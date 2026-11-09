@@ -1,11 +1,12 @@
 // Thin VS Code adapter: turns editor actions into session events and applies the session's effects.
 import * as vscode from "vscode";
 import { createSession, type SessionConfig } from "./core/session";
-import type { Clock, DocumentSnapshot, Effect, Position } from "./core/types";
+import { LEVELS, type Clock, type DocumentSnapshot, type Effect, type Level, type Position } from "./core/types";
 import { OpenRouterClient } from "./openrouter";
 import { appendLogEntry } from "./sessionLog";
 
 const KEY_SECRET = "pawl.openrouterKey";
+const LEVEL_STATE = "pawl.level";
 /** Context key the Esc and accept-next-word keybindings check, so they only wrap Pawl's suggestions. */
 const VISIBLE_KEY = "pawl.suggestionVisible";
 
@@ -32,8 +33,10 @@ interface Ghost {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  const { secrets } = context;
+  const { secrets, globalState } = context;
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  status.command = "pawl.pickLevel";
+  status.tooltip = "Pawl: choose a level";
   status.show();
   const marker = vscode.window.createTextEditorDecorationType({
     after: {
@@ -73,6 +76,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       case "clearMarker":
         return clearMarker();
+      case "notice":
+        vscode.window.setStatusBarMessage(effect.text, effect.ttlMs);
+        return;
       case "ghost":
         ghost = { docId: effect.docId, at: effect.at, text: effect.text };
         void setVisible(true);
@@ -88,6 +94,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (editor) editor.selections = [new vscode.Selection(toVs(effect.at), toVs(effect.at))];
         return;
       }
+      case "saveLevel":
+        void globalState.update(LEVEL_STATE, effect.level);
+        return;
       case "log":
         appendLogEntry(effect.entry).catch((err) => console.error("Pawl: could not write session log", err));
         return;
@@ -102,10 +111,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     clock,
     modelForLevel: (level) => vscode.workspace.getConfiguration("pawl").get<string>(`models.level${level}`) ?? "",
     config: readConfig,
+    level: LEVELS.find((l) => l.level === globalState.get(LEVEL_STATE))?.level,
     emit: apply,
   });
   const refreshKey = async () =>
     session.dispatch({ type: "keyChanged", hasKey: Boolean(await secrets.get(KEY_SECRET)) });
+  // The active file's `@pawl` pin sets the status bar, so the session sees every change to it.
+  const refreshActiveDoc = () => {
+    const document = vscode.window.activeTextEditor?.document;
+    return session.dispatch({
+      type: "activeDocChanged",
+      doc: document && !isNotebookCell(document) ? { languageId: document.languageId, text: document.getText() } : undefined,
+    });
+  };
 
   context.subscriptions.push(
     status,
@@ -127,6 +145,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           text: change.text,
         });
       }
+      if (e.document === vscode.window.activeTextEditor?.document) void refreshActiveDoc();
     }),
     vscode.window.onDidChangeTextEditorSelection((e) => {
       const { active } = e.selections[0];
@@ -136,12 +155,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         at: { line: active.line, character: active.character },
       });
     }),
-    vscode.window.onDidChangeActiveTextEditor(() => session.dispatch({ type: "editorChanged" })),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      void session.dispatch({ type: "editorChanged" });
+      void refreshActiveDoc();
+    }),
 
     vscode.commands.registerCommand("pawl.go", () => {
       const editor = vscode.window.activeTextEditor;
-      if (!editor) return;
+      if (!editor || isNotebookCell(editor.document)) return;
       return session.dispatch({ type: "go", doc: snapshot(editor) });
+    }),
+
+    vscode.commands.registerCommand("pawl.levelUp", () => session.dispatch({ type: "levelUp" })),
+    vscode.commands.registerCommand("pawl.levelDown", () => session.dispatch({ type: "levelDown" })),
+    vscode.commands.registerCommand("pawl.off", () => session.dispatch({ type: "setLevel", level: 0 })),
+    // Takes the level as an argument for tests; otherwise asks for it.
+    vscode.commands.registerCommand("pawl.pickLevel", async (level?: Level) => {
+      level ??= (
+        await vscode.window.showQuickPick(
+          LEVELS.map(({ level, name, writes }) => ({ label: `${level} · ${name}`, description: writes, level })),
+          { title: "Pawl: Choose level" },
+        )
+      )?.level;
+      if (level !== undefined) return session.dispatch({ type: "setLevel", level });
     }),
 
     // Takes the key as an argument for tests; otherwise asks for it.
@@ -193,9 +229,48 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   await refreshKey();
+  await refreshActiveDoc();
+  void checkCopilot();
 }
 
 const docIdOf = (document: vscode.TextDocument) => document.uri.toString();
+const isNotebookCell = (document: vscode.TextDocument) => document.uri.scheme === "vscode-notebook-cell";
+
+/** True when a `github.copilot.enable` value turns completions on: a boolean, or a per-language map. */
+const copilotEnableIsOn = (value: unknown) =>
+  value === true || (typeof value === "object" && value !== null && Object.values(value).includes(true));
+
+/**
+ * Warns when Copilot's ghost text would compete with Pawl's. Settings change only on the
+ * button click, and only in this workspace.
+ */
+async function checkCopilot(): Promise<void> {
+  const copilot = vscode.workspace.getConfiguration("github.copilot");
+  const completions = copilot.get<unknown>("enable");
+  const completionsOn = copilotEnableIsOn(completions);
+  const nextEditsOn = copilot.get<unknown>("nextEditSuggestions.enabled") === true;
+  if (!completionsOn && !nextEditsOn) return;
+
+  const disable = "Disable for this workspace";
+  const choice = await vscode.window.showWarningMessage(
+    "Copilot inline suggestions are on. Their ghost text will compete with Pawl's.",
+    disable,
+  );
+  if (choice !== disable) return;
+  const workspace = vscode.ConfigurationTarget.Workspace;
+  try {
+    if (completionsOn) {
+      const off =
+        typeof completions === "object" && completions !== null
+          ? { ...Object.fromEntries(Object.keys(completions).map((language) => [language, false])), "*": false }
+          : false;
+      await copilot.update("enable", off, workspace);
+    }
+    if (nextEditsOn) await copilot.update("nextEditSuggestions.enabled", false, workspace);
+  } catch (err) {
+    void vscode.window.showErrorMessage(`Pawl could not change the Copilot settings: ${err}`);
+  }
+}
 
 function snapshot(editor: vscode.TextEditor): DocumentSnapshot {
   const { document, selection, selections } = editor;

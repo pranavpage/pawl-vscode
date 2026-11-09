@@ -29,6 +29,22 @@
       {
         "command": "pawl.setOpenRouterKey",
         "title": "Pawl: Set OpenRouter key"
+      },
+      {
+        "command": "pawl.levelUp",
+        "title": "Pawl: Level up"
+      },
+      {
+        "command": "pawl.levelDown",
+        "title": "Pawl: Level down"
+      },
+      {
+        "command": "pawl.off",
+        "title": "Pawl: Off (level 0, overrides pins)"
+      },
+      {
+        "command": "pawl.pickLevel",
+        "title": "Pawl: Choose level"
       }
     ],
     "keybindings": [
@@ -36,6 +52,18 @@
         "command": "pawl.go",
         "key": "alt+enter",
         "when": "editorTextFocus && !findWidgetVisible && !notebookEditorFocused"
+      },
+      {
+        "command": "pawl.levelUp",
+        "key": "alt+="
+      },
+      {
+        "command": "pawl.levelDown",
+        "key": "alt+-"
+      },
+      {
+        "command": "pawl.off",
+        "key": "alt+0"
       },
       {
         "command": "pawl.reject",
@@ -55,7 +83,32 @@
         "pawl.models.level1": {
           "type": "string",
           "default": "deepseek/deepseek-v4.1-flash",
-          "description": "OpenRouter model ID used at level 1 (Syntax)."
+          "description": "OpenRouter model ID used at level 1 (Syntax). Any OpenRouter model works on any level.",
+          "order": 0
+        },
+        "pawl.models.level2": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4.1-flash",
+          "description": "OpenRouter model ID used at level 2 (Sentence). Any OpenRouter model works on any level.",
+          "order": 1
+        },
+        "pawl.models.level3": {
+          "type": "string",
+          "default": "z-ai/glm-5.3",
+          "description": "OpenRouter model ID used at level 3 (Block). Any OpenRouter model works on any level.",
+          "order": 2
+        },
+        "pawl.models.level4": {
+          "type": "string",
+          "default": "z-ai/glm-5.3",
+          "description": "OpenRouter model ID used at level 4 (Skeleton). Any OpenRouter model works on any level.",
+          "order": 3
+        },
+        "pawl.models.level5": {
+          "type": "string",
+          "default": "moonshotai/kimi-k3.1-pro",
+          "description": "OpenRouter model ID used at level 5 (Plan step). Any OpenRouter model works on any level.",
+          "order": 4
         },
         "pawl.timeout": {
           "type": "string",
