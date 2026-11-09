@@ -5,6 +5,7 @@
   "version": "0.0.1",
   "publisher": "pranavpage",
   "license": "MIT",
+  "icon": "assets/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/pranavpage/pawl-vscode.git"
