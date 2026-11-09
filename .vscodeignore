@@ -1,0 +1,11 @@
+.vscode-test/
+src/
+test/
+out/test/
+**/*.map
+**/*.test.*
+tsconfig.json
+vitest.config.mts
+docs/
+.context/
+.env
