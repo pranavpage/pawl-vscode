@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="34 32 256 256" shape-rendering="crispEdges" role="img" aria-labelledby="title"><title id="title">Pawl</title><g id="housing"><path d="M90 52 H234 V58 H252 V70 H264 V88 H270 V232 H264 V250 H252 V262 H234 V268 H90 V262 H72 V250 H60 V232 H54 V88 H60 V70 H72 V58 H90 Z" fill="#352B39"/>
+<path d="M90 58 H234 V64 H252 V76 H264 V220 H258 V238 H246 V250 H228 V256 H90 V250 H72 V238 H60 V88 H66 V76 H78 V64 H90 Z" fill="#F8EAD1"/>
+<path d="M90 82 H228 V88 H240 V100 H246 V214 H240 V226 H228 V232 H90 V226 H78 V214 H72 V100 H78 V88 H90 Z" fill="#352B39"/>
+<path d="M90 88 H228 V94 H240 V214 H234 V220 H222 V226 H90 V220 H78 V100 H84 V94 H90 Z" fill="#F8EAD1"/>
+</g>
+<g id="machined-P"><path d="M108 106 H174 V112 H192 V124 H198 V154 H192 V166 H174 V172 H132 V208 H108 Z M132 130 V148 H168 V142 H174 V136 H168 V130 Z" fill="#352B39" fill-rule="evenodd"/>
+</g>
+<g id="pawl"><path d="M216 154 H234 V196 H228 V208 H186 V184 H204 V172 H216 Z" fill="#352B39"/>
+<path d="M216 154 H228 V190 H222 V202 H186 V184 H204 V172 H216 Z" fill="#E26F43"/>
+<rect x="216" y="190" width="6" height="6" fill="#352B39"/></g><g id="corner-fasteners"><g><path d="M75 67 h9 v3 h3 v9 h-3 v3 h-9 v-3 h-3 v-9 h3 Z" fill="#352B39"/><rect x="75" y="70" width="9" height="9" fill="#F8EAD1"/><path d="M75 73 h9 v3 h-9 Z" fill="#352B39"/></g><g><path d="M240 67 h9 v3 h3 v9 h-3 v3 h-9 v-3 h-3 v-9 h3 Z" fill="#352B39"/><rect x="240" y="70" width="9" height="9" fill="#F8EAD1"/><path d="M240 73 h9 v3 h-9 Z" fill="#352B39"/></g><g><path d="M75 232 h9 v3 h3 v9 h-3 v3 h-9 v-3 h-3 v-9 h3 Z" fill="#352B39"/><rect x="75" y="235" width="9" height="9" fill="#F8EAD1"/><path d="M75 238 h9 v3 h-9 Z" fill="#352B39"/></g><g><path d="M240 232 h9 v3 h3 v9 h-3 v3 h-9 v-3 h-3 v-9 h3 Z" fill="#352B39"/><rect x="240" y="235" width="9" height="9" fill="#F8EAD1"/><path d="M240 238 h9 v3 h-9 Z" fill="#352B39"/></g></g></svg>
