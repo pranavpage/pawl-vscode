@@ -1,0 +1,66 @@
+{
+  "name": "pawl",
+  "displayName": "Pawl",
+  "description": "On-demand AI completion with a 0–5 help dial, triggered only by a go key.",
+  "version": "0.0.1",
+  "publisher": "pranavpage",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pranavpage/pawl-vscode.git"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pawl.go",
+        "title": "Pawl: Go"
+      },
+      {
+        "command": "pawl.setOpenRouterKey",
+        "title": "Pawl: Set OpenRouter key"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "pawl.go",
+        "key": "alt+enter",
+        "when": "editorTextFocus && !findWidgetVisible && !notebookEditorFocused"
+      }
+    ],
+    "configuration": {
+      "title": "Pawl",
+      "properties": {
+        "pawl.models.level1": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4.1-flash",
+          "description": "OpenRouter model ID used at level 1 (Syntax)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:smoke": "npm run compile && node ./out/test/smoke/runTest.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.20.5",
+    "@types/vscode": "~1.100.0",
+    "@vscode/test-electron": "^3.1.0",
+    "mocha": "^12.0.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
