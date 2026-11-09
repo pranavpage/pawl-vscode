@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE · Pawl under real load: rate limits</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --accent: #2f6fdb; --ink: #1d2330; --muted: #6b7385; --line: #e3e6ec; --bg: #fafbfc; --bad: #c2412d; --good: #23865a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; color: var(--ink); background: var(--bg); }
+  main { max-width: 1180px; margin: 0 auto; padding: 32px 28px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 36px 0 12px; }
+  h3 { font-size: 15px; margin: 0 0 8px; }
+  p { margin: 0 0 10px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 600; color: var(--bad); border: 1px solid var(--bad); border-radius: 4px; padding: 1px 6px; margin-bottom: 10px; }
+  .intro { max-width: 820px; color: #333a48; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+  .grid { display: grid; gap: 14px; }
+  .g4 { grid-template-columns: repeat(4, 1fr); } .g3 { grid-template-columns: repeat(3, 1fr); } .g2 { grid-template-columns: 1fr 1fr; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .d { font-size: 12px; font-variant-numeric: tabular-nums; min-height: 18px; }
+  .up { color: var(--bad); } .down { color: var(--good); } .flat { color: var(--muted); }
+  .need { border-left: 4px solid var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 4px 0; border-bottom: 1px solid var(--line); } td:last-child { text-align: right; }
+  tr:last-child td { border-bottom: 0; }
+  .bar { height: 8px; background: var(--accent); border-radius: 4px; opacity: .8; }
+  .settings { font-size: 13px; color: #333a48; columns: 2; column-gap: 28px; }
+  .settings div { break-inside: avoid; padding: 2px 0; } .settings b { font-weight: 600; }
+  .settings .changed { background: #fff4c2; border-radius: 3px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 3px; }
+  select, input[type=range] { width: 100%; font: inherit; }
+  select { padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink); margin: 10px 0 0; }
+  button { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 7px; border: 1px solid var(--accent); background: #fff; color: var(--accent); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; }
+  button:disabled { opacity: .35; cursor: default; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--muted); padding: 8px 12px; }
+  .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+  .steps { list-style: none; padding: 0; margin: 14px 0 0; }
+  .steps li { display: flex; gap: 12px; align-items: center; margin: 8px 0; }
+  .steps .n { width: 22px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .steps li.done button { border-color: var(--line); color: var(--muted); }
+  .note { font-size: 13px; color: #333a48; background: #f1f5fd; border-radius: 8px; padding: 10px 14px; margin-top: 12px; }
+  .src { font-size: 12.5px; color: #4a5263; } .src li { margin: 3px 0; }
+  .log { font-size: 12.5px; color: var(--muted); max-height: 120px; overflow: auto; margin-top: 10px; }
+  code { font-size: 12.5px; background: #f0f2f6; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<main>
+  <span class="tag">PROTOTYPE · throwaway</span>
+  <h1>Pawl under real load: how often do we hit rate limits?</h1>
+  <div class="intro">
+    <p><b>The question:</b> under real human use of the go key, how many requests per minute does Pawl send to OpenRouter, which limits does it hit (requests per minute, requests per day, credit budget, provider slowdown), and what are the <i>minimum</i> limits Pawl needs so a user never sees <code>! rate limit</code>?</p>
+    <p>This page simulates people pressing the go key and runs each press through Pawl's current request rules: a new press cancels the one in flight, there is no retry after a rate limit, the whole file goes in the prompt. The latency and concurrency numbers come from real requests made with your OpenRouter key on 2026-11-09 (see <i>Where the numbers come from</i> at the bottom). Same settings give the same result every time, so you can change one thing and compare.</p>
+  </div>
+
+  <h2>Results of the last run</h2>
+  <div id="results"></div>
+
+  <h2>Current settings</h2>
+  <div class="card"><div class="settings" id="settings"></div><div class="log" id="log"></div></div>
+
+  <h2>Free play</h2>
+  <div class="card">
+    <div class="grid g4">
+      <div>
+        <h3>Who is coding</h3>
+        <label>How they use the go key</label><select data-k="persona"></select>
+        <label>People sharing one OpenRouter account</label><select data-k="team"></select>
+        <label>Hours of real coding per day</label><select data-k="hoursPerDay"></select>
+      </div>
+      <div>
+        <h3>What they press</h3>
+        <label>Level on the dial</label><select data-k="level"></select>
+        <label>Model on that level</label><select data-k="model"></select>
+        <label>Size of the file they are in</label><select data-k="fileTok"></select>
+      </div>
+      <div>
+        <h3>OpenRouter limits</h3>
+        <label>Account limits</label><select data-k="limits"></select>
+        <label>Requests in flight before the provider slows down</label><select data-k="slots"></select>
+        <label>Weekly credit limit on the key</label><select data-k="budget"></select>
+      </div>
+      <div>
+        <h3>Pawl design tweaks</h3>
+        <label>What goes in the prompt</label><select data-k="context"></select>
+        <label>Minimum gap between requests</label><select data-k="minGapMs"></select>
+        <label>Timeout per go-press</label><select data-k="timeoutS"></select>
+        <div class="check"><input type="checkbox" data-k="coalesce" id="c1"><span>Ignore a go-press while Pawl is still asking at the same spot</span></div>
+        <div class="check"><input type="checkbox" data-k="retry429"><span>After a rate limit, wait and try once more within the timeout</span></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:20px">
+      <button class="primary" data-run="hour">Simulate 1 hour</button>
+      <button class="primary" data-run="day">Simulate 1 day</button>
+      <button class="primary" data-run="week">Simulate a work week</button>
+      <button data-reset>Reset to today's design</button>
+    </div>
+  </div>
+
+  <h2>Guided walkthroughs</h2>
+  <div class="card">
+    <div class="tabs" id="tabs"></div>
+    <div id="scenario"></div>
+  </div>
+
+  <h2>Where the numbers come from</h2>
+  <div class="card src">
+    <p><b>Measured</b> with <code>prototypes/rate-limits/probe.mjs</code> against your key, same request shape as <code>src/core/session.ts</code>:</p>
+    <ul>
+      <li>Your key has <b>no request-rate limit</b> (<code>GET /api/v1/key</code> → <code>rate_limit.requests: -1</code>) and a <b>$50/week</b> credit limit. OpenRouter docs: paid models have "no platform-level request cap"; limits are per account, not per key.</li>
+      <li>Level 1 (DeepSeek V4.1 Flash, about 3.6k-token file): time to the end of the line p50 <b>640 ms</b>, p90 2.0 s. A 41k-token file: p50 1.7 s. That gives roughly 530 ms + 30 ms per 1k prompt tokens.</li>
+      <li>25 presses at the same moment: <b>no 429s</b>, but p50 13.6 s. With separate connections, about 5 run in parallel; each one after that waits about 0.7 s more. So too much load shows up as delay, not as a 429.</li>
+      <li>Held go key (60 presses at 30 Hz, each cancels the one before): 60 requests sent, 59 cancelled, no 429s.</li>
+      <li>Kimi K3.1 Pro: p50 1.3 s.</li>
+      <li>Prices ($ per 1M tokens, in/out): Flash 0.051/0.567, Kimi K3.1 Pro 2.00/10.00.</li>
+    </ul>
+    <p><b>From OpenRouter docs:</b> <code>:free</code> models allow 20 requests/min, and 50/day (under $10 of credits ever bought) or 1000/day ($10 or more). A negative balance gives 402. When a provider sends back 429, OpenRouter first tries other providers.</p>
+    <p><b>Assumed (not measured):</b> how often each type of user presses the go key, free-model latency (1.5× Flash), the length of a held key press, and the size of each prompt and reply.</p>
+  </div>
+</main>
+
+<script>
+// ===================== Portable logic module: no DOM below this line until the page shell =====================
+const PawlLoad = (() => {
+  const MODELS = {
+    flash: { label: "DeepSeek V4.1 Flash", inUsd: 0.051, outUsd: 0.567, baseMs: 530, msPerKTok: 30, empty: 0.05 },
+    kimi:  { label: "Kimi K3.1 Pro", inUsd: 2.0, outUsd: 10.0, baseMs: 1240, msPerKTok: 30, empty: 0.05 },
+    free:  { label: "A :free model", inUsd: 0, outUsd: 0, baseMs: 800, msPerKTok: 45, empty: 0.08, free: true },
+  };
+  /** Reply tokens per level: level 1 stops at the end of the line, the rest run to max_tokens 128. */
+  const OUT_TOK = { 1: 15, 3: 100, 5: 128 };
+  const SYSTEM_TOK = 120;
+  const SIGMA = 0.7; // spread of latency (lognormal), fitted to p50 640 / p90 ~2 s
+  const QUEUE_S = 0.7; // extra wait per request beyond the provider's parallel slots
+
+  const PERSONAS = {
+    calm:   { label: "Occasional: a press every ~40 s", meanGap: 40, regen: 0.10, hold: 0 },
+    steady: { label: "Steady: a press every ~20 s", meanGap: 20, regen: 0.20, hold: 0 },
+    heavy:  { label: "Heavy: a press every ~6 s, regenerates a lot", meanGap: 6, regen: 0.35, hold: 0 },
+    holder: { label: "Steady, but sometimes holds the go key down", meanGap: 20, regen: 0.20, hold: 0.04 },
+  };
+  const LIMITS = {
+    paid:    { label: "Paid model: no request cap (today)", rpm: Infinity, perDay: Infinity },
+    free50:  { label: ":free model, under $10 ever bought (20/min, 50/day)", rpm: 20, perDay: 50, free: true },
+    free1k:  { label: ":free model, $10+ ever bought (20/min, 1000/day)", rpm: 20, perDay: 1000, free: true },
+    rpm60:   { label: "What if: 60 requests/min", rpm: 60, perDay: Infinity },
+    rpm10:   { label: "What if: 10 requests/min", rpm: 10, perDay: Infinity },
+  };
+  const OUTCOMES = {
+    shown: "Suggestion shown",
+    empty: "· nothing to add",
+    replaced: "Cancelled by the next press",
+    ignored: "Press ignored by a tweak",
+    timeout: "! timeout",
+    rate: "! rate limit",
+    budget: "! out of credit",
+  };
+
+  const DEFAULTS = {
+    persona: "steady", team: 1, hoursPerDay: 4,
+    level: 1, models: { 1: "flash", 3: "flash", 5: "kimi" }, fileTok: 4000,
+    limits: "paid", slots: 5, budget: 50,
+    context: "whole", minGapMs: 0, timeoutS: 8, coalesce: false, retry429: false,
+    seed: 7,
+  };
+
+  function mulberry32(a) {
+    return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  }
+  const gauss = (rng) => Math.sqrt(-2 * Math.log(1 - rng())) * Math.cos(2 * Math.PI * rng());
+  const expo = (rng, mean) => -Math.log(1 - rng()) * mean;
+
+  /** Go-press times (seconds) for one person over `seconds` of coding. */
+  function pressTimes(persona, seconds, rng) {
+    const p = PERSONAS[persona], out = [];
+    let now = rng() * 10;
+    while (now < seconds) {
+      out.push(now);
+      let last = now;
+      while (rng() < p.regen) { last += 1 + rng() * 2; out.push(last); } // "not this, another one"
+      if (p.hold && rng() < p.hold) {
+        // Holds the go key: OS key repeat starts after ~0.5 s, then fires at ~30 Hz.
+        const start = last + 1.5, repeats = 15 + Math.floor(rng() * 45);
+        out.push(start);
+        for (let i = 0; i < repeats; i++) out.push(start + 0.5 + i / 30);
+        last = start + 0.5 + repeats / 30;
+      }
+      now = last + 2 + expo(rng, p.meanGap);
+    }
+    return out.filter((t) => t < seconds);
+  }
+
+  const countIn = (sorted, from, to) => { // requests with from < t <= to
+    let lo = 0, hi = sorted.length; while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] <= from) lo = m + 1; else hi = m; }
+    let a = lo; lo = a; hi = sorted.length; while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] <= to) lo = m + 1; else hi = m; }
+    return lo - a;
+  };
+  const insertSorted = (arr, x) => { let i = arr.length; arr.push(x); while (i > 0 && arr[i - 1] > x) { arr[i] = arr[i - 1]; i--; } arr[i] = x; };
+  const peakWindow = (sorted, w) => { let best = 0, j = 0; for (let i = 0; i < sorted.length; i++) { while (sorted[i] - sorted[j] >= w) j++; best = Math.max(best, i - j + 1); } return best; };
+  const quantile = (xs, q) => { if (!xs.length) return undefined; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+
+  /** Runs the design over `span` ("hour" | "day" | "week"). Pure: same config, same result. */
+  function simulate(cfg, span, uncapped = false) {
+    const rng = mulberry32(cfg.seed);
+    const model = MODELS[cfg.models[cfg.level]];
+    const lim = uncapped ? LIMITS.paid : model.free && !LIMITS[cfg.limits].free ? LIMITS.free50 : LIMITS[cfg.limits];
+    const budget = uncapped ? Infinity : cfg.budget;
+    const days = span === "week" ? 5 : 1;
+    const seconds = span === "hour" ? 3600 : cfg.hoursPerDay * 3600;
+    const ctxTok = cfg.context === "whole" ? cfg.fileTok : Math.min(cfg.fileTok, Number(cfg.context));
+    const inTok = ctxTok + SYSTEM_TOK;
+    const costIn = (inTok * model.inUsd) / 1e6, costOut = (OUT_TOK[cfg.level] * model.outUsd) / 1e6;
+    const r = { span, presses: 0, requests: 0, outcomes: Object.fromEntries(Object.keys(OUTCOMES).map((k) => [k, 0])),
+      latencies: [], tokensIn: 0, usd: 0, maxInFlight: 0, peak10: 0, peak60: 0, maxDayRequests: 0, rejected: 0, wasted: 0 };
+
+    for (let day = 0; day < days; day++) {
+      const users = Array.from({ length: cfg.team }, () => ({ press: null, lastReqAt: -1e9 }));
+      const presses = users.flatMap((_, u) => pressTimes(cfg.persona, seconds, rng).map((t) => ({ t, u }))).sort((a, b) => a.t - b.t);
+      const sent = [], active = [];
+      let dayRequests = 0;
+
+      /** Tries one request at time t. Returns { ok } or { error }. Rejected requests don't count against the window. */
+      const tryRequest = (t) => {
+        if (r.usd >= budget) return { error: "budget" };
+        if (dayRequests >= lim.perDay || countIn(sent, t - 60, t) >= lim.rpm) { r.rejected++; return { error: "rate" }; }
+        insertSorted(sent, t); dayRequests++; r.requests++;
+        return { ok: true };
+      };
+      const retryAt = (t) => { // when the per-minute window frees a slot (Retry-After), else 1 s
+        if (dayRequests >= lim.perDay) return Infinity;
+        const n = countIn(sent, t - 60, t); if (n < lim.rpm) return t + 1;
+        return sent[sent.length - n] + 60 + 0.01;
+      };
+      const bill = (fraction) => { r.tokensIn += inTok; r.usd += costIn + costOut * fraction; };
+
+      for (const { t, u: ui } of presses) {
+        const u = users[ui];
+        r.presses++;
+        const busy = u.press && u.press.end > t ? u.press : null;
+        if (busy && cfg.coalesce) { r.outcomes.ignored++; continue; }
+        if (t - u.lastReqAt < cfg.minGapMs / 1000) { r.outcomes.ignored++; continue; }
+        if (busy) { // the new press cancels the request in flight; the provider has usually read the prompt already
+          r.outcomes[busy.outcome]--; r.outcomes.replaced++; busy.end = t; r.wasted++;
+          if (t - busy.start > 0.15) bill(0.3);
+        }
+        const deadline = t + cfg.timeoutS;
+        let at = t;
+        let attempt = tryRequest(at);
+        if (attempt.error === "rate" && cfg.retry429) { const again = retryAt(at); if (again < deadline - 0.5) { at = again; attempt = tryRequest(at); } }
+        u.lastReqAt = at;
+        const press = { start: at, end: at, outcome: "shown" };
+        u.press = press;
+        if (attempt.error) { press.outcome = attempt.error; r.outcomes[press.outcome]++; continue; }
+
+        const inFlight = active.filter((p) => p.start <= at && p.end > at).length;
+        r.maxInFlight = Math.max(r.maxInFlight, inFlight + 1);
+        const queue = Math.max(0, inFlight + 1 - cfg.slots) * QUEUE_S;
+        const once = () => (model.baseMs + (model.msPerKTok * inTok) / 1000) / 1000 * Math.exp(SIGMA * gauss(rng));
+        let end = at + queue + once();
+        bill(1);
+        const empty = rng() < model.empty;
+        press.end = Math.min(end, deadline);
+        press.outcome = end > deadline ? "timeout" : empty ? "empty" : "shown";
+        r.outcomes[press.outcome]++;
+        if (press.outcome === "shown") press.latency = end - t;
+        active.push(press);
+        if (active.length > 64) active.splice(0, active.length - 64);
+        r.latencies.push(press);
+      }
+      r.peak10 = Math.max(r.peak10, peakWindow(sent, 10));
+      r.peak60 = Math.max(r.peak60, peakWindow(sent, 60));
+      r.maxDayRequests = Math.max(r.maxDayRequests, dayRequests);
+    }
+    const lat = r.latencies.filter((p) => p.outcome === "shown").map((p) => p.latency * 1000);
+    r.p50 = quantile(lat, 0.5); r.p90 = quantile(lat, 0.9);
+    delete r.latencies;
+    const activeHours = (days * seconds) / 3600;
+    r.activeHours = activeHours;
+    r.perActiveMinute = r.requests / (activeHours * 60);
+    r.usdPerWeek = span === "week" ? r.usd : (r.usd / activeHours) * cfg.hoursPerDay * 5;
+    r.budgetHit = r.outcomes.budget > 0;
+    r.modelFree = !!model.free;
+    r.limitsUsed = lim;
+    return r;
+  }
+
+  /** Same run with every limit lifted: what Pawl actually asks for. */
+  function needs(cfg, span) {
+    const r = simulate(cfg, span, true);
+    return { rpm: r.peak60, per10s: r.peak10, perDay: r.maxDayRequests, inFlight: r.maxInFlight, usdPerWeek: r.usdPerWeek };
+  }
+
+  const initial = () => ({ config: structuredClone(DEFAULTS), last: null, prev: null, log: [] });
+
+  /** (state, action) => state */
+  function reduce(state, action) {
+    switch (action.type) {
+      case "reset": return initial();
+      case "set": {
+        const config = structuredClone(state.config);
+        if (action.key === "model") config.models[config.level] = action.value; else config[action.key] = action.value;
+        return { ...state, config, log: [...state.log, `Changed: ${action.key} → ${String(action.value)}`] };
+      }
+      case "run": {
+        const result = simulate(state.config, action.span);
+        result.needs = needs(state.config, action.span);
+        result.config = structuredClone(state.config);
+        return { ...state, prev: state.last, last: result, log: [...state.log, `Ran ${action.span}`] };
+      }
+    }
+    return state;
+  }
+
+  return { MODELS, PERSONAS, LIMITS, OUTCOMES, DEFAULTS, initial, reduce, simulate };
+})();
+
+// ===================== Page shell (throwaway) =====================
+const { MODELS, PERSONAS, LIMITS, OUTCOMES, initial, reduce } = PawlLoad;
+let state = initial();
+
+const OPTIONS = {
+  persona: Object.entries(PERSONAS).map(([v, p]) => [v, p.label]),
+  team: [[1, "Just me"], [3, "3 people"], [10, "10 people"], [30, "30 people"]],
+  hoursPerDay: [[2, "2 h"], [4, "4 h"], [6, "6 h"]],
+  level: [[1, "1 · Syntax"], [3, "3 · Block"], [5, "5 · Plan step"]],
+  model: Object.entries(MODELS).map(([v, m]) => [v, m.label]),
+  fileTok: [[1000, "Small (~1k tokens, ~100 lines)"], [4000, "Medium (~4k tokens, ~350 lines)"], [15000, "Large (~15k tokens)"], [40000, "Huge (~40k tokens, ~3500 lines)"]],
+  limits: Object.entries(LIMITS).map(([v, l]) => [v, l.label]),
+  slots: [[1, "1"], [5, "5 (measured)"], [20, "20"]],
+  budget: [[5, "$5"], [50, "$50 (your key)"], [Infinity, "No limit"]],
+  context: [["whole", "Whole file (today)"], ["2000", "Up to 2k tokens around the cursor"], ["12000", "Up to 12k tokens (spec for levels 3–5)"]],
+  minGapMs: [[0, "None (today)"], [250, "250 ms"], [1000, "1 s"]],
+  timeoutS: [[8, "8 s (default)"], [4, "4 s"]],
+};
+const LABEL = { persona: "Go-key habit", team: "People on the account", hoursPerDay: "Coding hours per day", level: "Level", model: "Model on that level", fileTok: "File size",
+  limits: "Account limits", slots: "Parallel slots at provider", budget: "Weekly credit limit", context: "Prompt contains", minGapMs: "Minimum gap", timeoutS: "Timeout",
+  coalesce: "Ignore presses while asking", retry429: "Retry after rate limit" };
+
+const valueOf = (cfg, k) => (k === "model" ? cfg.models[cfg.level] : cfg[k]);
+const nameOf = (k, v) => { if (typeof v === "boolean") return v ? "On" : "Off"; const o = (OPTIONS[k] || []).find(([x]) => String(x) === String(v)); return o ? o[1] : String(v); };
+
+document.querySelectorAll("select[data-k]").forEach((s) => {
+  s.innerHTML = OPTIONS[s.dataset.k].map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+  s.onchange = () => dispatch({ type: "set", key: s.dataset.k, value: parse(s.dataset.k, s.value) });
+});
+document.querySelectorAll("input[data-k]").forEach((c) => (c.onchange = () => dispatch({ type: "set", key: c.dataset.k, value: c.checked })));
+document.querySelectorAll("[data-run]").forEach((b) => (b.onclick = () => dispatch({ type: "run", span: b.dataset.run })));
+document.querySelector("[data-reset]").onclick = () => dispatch({ type: "reset" });
+function parse(k, v) { return ["persona", "limits", "context", "model"].includes(k) ? v : v === "Infinity" ? Infinity : Number(v); }
+
+function dispatch(action) { state = reduce(state, action); render(); }
+
+const fmt = (n, d = 0) => (n === undefined || n === null || Number.isNaN(n) ? "–" : n === Infinity ? "∞" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d }));
+const money = (n) => (n < 0.01 && n > 0 ? "<$0.01" : "$" + fmt(n, n < 10 ? 2 : 0));
+const SPAN = { hour: "1 hour", day: "1 day", week: "a work week" };
+
+function delta(key, better = "down", f = (x) => fmt(x)) {
+  const a = state.last?.[key], b = state.prev?.[key];
+  if (state.prev === null || a === undefined || b === undefined) return "";
+  if (Math.abs(a - b) < 1e-9) return `<span class="flat">no change</span>`;
+  const up = a > b, good = better === "down" ? !up : up;
+  return `<span class="${good ? "down" : "up"}">${up ? "▲" : "▼"} from ${f(b)}</span>`;
+}
+const stat = (k, v, d = "") => `<div class="card stat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+
+function render() {
+  const c = state.config;
+  document.querySelectorAll("[data-k]").forEach((el) => { const v = valueOf(c, el.dataset.k); if (el.type === "checkbox") el.checked = v; else el.value = String(v); });
+
+  const ran = state.last?.config;
+  document.getElementById("settings").innerHTML = Object.keys(LABEL).map((k) => {
+    const changed = ran && String(valueOf(ran, k)) !== String(valueOf(c, k));
+    return `<div class="${changed ? "changed" : ""}">${LABEL[k]}: <b>${nameOf(k, valueOf(c, k))}</b>${changed ? " (not run yet)" : ""}</div>`;
+  }).join("");
+  document.getElementById("log").innerHTML = state.log.slice(-6).reverse().map((l) => `<div>${l}</div>`).join("");
+
+  const r = state.last, el = document.getElementById("results");
+  if (!r) { el.innerHTML = `<div class="card">No run yet. Press <b>Simulate</b>, or start a walkthrough below.</div>`; return; }
+  const bad = r.outcomes.rate + r.outcomes.timeout + r.outcomes.budget;
+  const total = r.presses || 1;
+  el.innerHTML = `
+    <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Simulated ${SPAN[r.span]}: ${fmt(r.activeHours, 0)} h of coding × ${r.config.team} ${r.config.team === 1 ? "person" : "people"} · ${nameOf("persona", r.config.persona)} · level ${r.config.level} on ${MODELS[r.config.models[r.config.level]].label}</p>
+    <div class="grid g4">
+      ${stat("Go-presses", fmt(r.presses), delta("presses"))}
+      ${stat("Requests sent to OpenRouter", fmt(r.requests), delta("requests"))}
+      ${stat("Peak requests in any minute", fmt(r.peak60), delta("peak60"))}
+      ${stat("Presses that ended in an error", `${fmt((100 * bad) / total, 1)}%`, `${fmt(bad)} presses`)}
+      ${stat("Requests per press", fmt(r.requests / total, 2), `${fmt(r.wasted)} cancelled or extra`)}
+      ${stat("Peak requests in any 10 s", fmt(r.peak10), delta("peak10"))}
+      ${stat("Time to suggestion (p50 · p90)", `${fmt(r.p50)} · ${fmt(r.p90)} ms`, delta("p90", "down", (x) => fmt(x) + " ms p90"))}
+      ${stat("Cost per work week", money(r.usdPerWeek), delta("usdPerWeek", "down", money) + (r.config.budget !== Infinity ? ` · ${fmt((100 * r.usdPerWeek) / r.config.budget, 0)}% of $${r.config.budget}` : ""))}
+    </div>
+    <div class="grid g2" style="margin-top:14px">
+      <div class="card">
+        <h3>What happened to each go-press</h3>
+        <table>${Object.entries(OUTCOMES).map(([k, label]) => `<tr><td style="width:46%">${label}</td><td style="width:40%"><div class="bar" style="width:${(100 * r.outcomes[k]) / total}%;${["rate", "timeout", "budget"].includes(k) ? "background:var(--bad)" : ""}"></div></td><td>${fmt(r.outcomes[k])}</td></tr>`).join("")}</table>
+      </div>
+      <div class="card need">
+        <h3>The minimum limits this use needs (no <code>! rate limit</code>, no slowdown)</h3>
+        <table>
+          <tr><td>Requests per minute</td><td><b>${fmt(r.needs.rpm)}</b> (limit in this run: ${fmt(r.limitsUsed.rpm)})</td></tr>
+          <tr><td>Requests in any 10 s</td><td><b>${fmt(r.needs.per10s)}</b></td></tr>
+          <tr><td>Requests per day (busiest day)</td><td><b>${fmt(r.needs.perDay)}</b> (limit: ${fmt(r.limitsUsed.perDay)})</td></tr>
+          <tr><td>Requests in flight at once</td><td><b>${fmt(r.needs.inFlight)}</b> (provider runs ${fmt(r.config.slots)} in parallel)</td></tr>
+          <tr><td>Credit per work week</td><td><b>${money(r.needs.usdPerWeek)}</b> (limit: ${r.config.budget === Infinity ? "none" : "$" + r.config.budget})</td></tr>
+        </table>
+        <p style="font-size:12px;color:var(--muted);margin:8px 0 0">The same run with every limit lifted. The tweaks still apply, so you can see how much each one lowers these numbers.</p>
+      </div>
+    </div>`;
+}
+
+// ===================== Walkthroughs =====================
+const set = (key, value) => ({ type: "set", key, value });
+const run = (span) => ({ type: "run", span });
+const SCENARIOS = [
+  { title: "A normal week", text: "One person pressing the go key every 20 s or so at level 1, on today's design and your paid key. <b>Watch for:</b> how few requests per minute this is, and how small the cost is. Today Pawl needs only a few requests per minute and about one in flight.",
+    steps: [["Run a work week on today's design", [run("week")]], ["Switch to a heavy user (a press every ~6 s)", [set("persona", "heavy")]], ["Run the week again", [run("week")]]] },
+  { title: "Holding the go key", text: "Some people hold the key down. Key repeat fires about 30 presses per second, and today each press sends a request and cancels the one before. <b>Watch for:</b> requests per press, and the peak in 10 s. On a paid key, nothing breaks, but the requests are wasted. On a free model, the same habit hits the 20/min limit right away.",
+    steps: [["Use the user who sometimes holds the key", [set("persona", "holder")]], ["Run 1 day on your paid key", [run("day")]], ["Switch to a free model on level 1", [set("model", "free"), set("limits", "free1k")]], ["Run the day again: look at ! rate limit", [run("day")]], ["Turn on \"ignore a go-press while Pawl is still asking\"", [set("coalesce", true)]], ["Run the day again", [run("day")]]] },
+  { title: "Free models", text: "<code>:free</code> models allow 20 requests per minute, and 50 per day (or 1000 per day once you have bought $10 of credits). <b>Watch for:</b> how fast the daily limit runs out. The per-minute limit is rarely the problem.",
+    steps: [["Put a free model on level 1, under $10 bought", [set("model", "free"), set("limits", "free50")]], ["Run 1 day (4 h of coding)", [run("day")]], ["Buy $10 of credits (1000/day)", [set("limits", "free1k")]], ["Run the day again", [run("day")]], ["Now a heavy user", [set("persona", "heavy")]], ["Run the day again", [run("day")]]] },
+  { title: "Big file, costly model", text: "Today the prompt holds the whole file, at every level. Kimi K3.1 Pro costs 40× more per input token than Flash. <b>Watch for:</b> the weekly cost against your $50 credit limit. For a paid key, this limit is the real one.",
+    steps: [["Put Kimi K3.1 Pro on level 1", [set("model", "kimi")]], ["Work in a huge file (~40k tokens)", [set("fileTok", 40000)]], ["Run a work week", [run("week")]], ["Limit the prompt to 2k tokens around the cursor", [set("context", "2000")]], ["Run the week again", [run("week")]]] },
+  { title: "A team on one account", text: "OpenRouter limits are per account, not per key. Ten heavy users on one account never hit a request cap, but too many requests at once wait their turn at the provider. <b>Watch for:</b> p90 time to suggestion and ! timeout as the team grows, mostly with a 4 s timeout.",
+    steps: [["Ten heavy users on one account", [set("team", 10), set("persona", "heavy")]], ["Run 1 hour", [run("hour")]], ["Thirty heavy users, 4 s timeout", [set("team", 30), set("timeoutS", 4)]], ["Run 1 hour again", [run("hour")]], ["What if the account had a 60 requests/min cap", [set("limits", "rpm60")]], ["Run 1 hour again", [run("hour")]]] },
+];
+let tab = 0, stepAt = 0;
+function renderScenario() {
+  document.getElementById("tabs").innerHTML = SCENARIOS.map((s, i) => `<button class="${i === tab ? "on" : ""}" data-tab="${i}">${s.title}</button>`).join("");
+  document.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => { tab = Number(b.dataset.tab); stepAt = 0; renderScenario(); }));
+  const s = SCENARIOS[tab];
+  document.getElementById("scenario").innerHTML = `<p class="note">${s.text}</p>
+    <div class="row" style="margin-top:12px"><button data-start>Start this walkthrough (resets settings)</button></div>
+    <ol class="steps">${s.steps.map(([label], i) => `<li class="${i < stepAt ? "done" : ""}"><span class="n">${i + 1}</span><button ${i === stepAt ? 'class="primary"' : ""} ${i !== stepAt ? "disabled" : ""} data-step="${i}">${label}</button></li>`).join("")}</ol>`;
+  document.querySelector("[data-start]").onclick = () => { dispatch({ type: "reset" }); stepAt = 0; renderScenario(); };
+  document.querySelectorAll("[data-step]").forEach((b) => (b.onclick = () => {
+    if (stepAt === 0) state = initial();
+    s.steps[Number(b.dataset.step)][1].forEach(dispatch);
+    stepAt++; renderScenario();
+  }));
+}
+render(); renderScenario();
+</script>
+</body>
+</html>
