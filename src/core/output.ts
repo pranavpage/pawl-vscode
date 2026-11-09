@@ -25,10 +25,10 @@ export function cutAtStopPoint(raw: string): string | undefined {
   const body = stripLeadingFence(raw);
   if (body === undefined) return undefined;
   const eol = body.indexOf("\n");
-  return eol < 0 ? undefined : body.slice(0, eol);
+  return eol < 0 ? undefined : body.slice(0, eol).replace(TRAILING_FENCE, "");
 }
 
 /** Final cut once the stream has ended without reaching a stop point. */
-export function finish(raw: string): string {
+export function cutAtStreamEnd(raw: string): string {
   return cutAtStopPoint(raw) ?? (stripLeadingFence(raw) ?? "").replace(TRAILING_FENCE, "");
 }

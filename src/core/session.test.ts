@@ -62,10 +62,10 @@ describe("the request", () => {
     expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
   });
 
-  it("falls back to excluding reasoning when the model rejects effort none", async () => {
+  it("falls back to excluding reasoning when the model rejects the request", async () => {
     const { session, model, of } = setup();
     model
-      .reply({ error: new ModelError("bad_request", "Reasoning effort 'none' is not supported", 400) })
+      .reply({ error: new ModelError("bad_request", "Provider returned error", 400) })
       .reply({ text: "x)\n" });
 
     await session.dispatch({ type: "go", doc: doc("print(|") });
@@ -80,6 +80,7 @@ describe("model output", () => {
     ["a fenced reply", ["```python\n", "x)\n", "```"]],
     ["a fence split across chunks", ["``", "`py\nx)", "\n```\n"]],
     ["a trailing fence on the same line", ["x)```"]],
+    ["a trailing fence before the newline", ["x)```\n"]],
   ])("strips markdown fences from %s", async (_, chunks) => {
     const { session, model, of } = setup();
     model.reply(...chunks.map((text) => ({ text })));

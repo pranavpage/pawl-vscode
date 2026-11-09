@@ -1,5 +1,5 @@
 import * as assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -100,6 +100,11 @@ describe("Pawl smoke", () => {
     assert.equal(entry.suggestion, "name)");
     assert.equal(entry.provider, "FakeProvider");
     assert.ok(!lines[0].includes("sk-or-smoke-test"), "the key never appears in the log");
+    const settings = join(process.env.PAWL_USER_DATA_DIR!, "User", "settings.json");
+    assert.ok(
+      !existsSync(settings) || !readFileSync(settings, "utf8").includes("sk-or-smoke-test"),
+      "the key never appears in settings.json",
+    );
 
     await vscode.commands.executeCommand("workbench.action.files.revert");
     assert.equal(editor.document.getText(), original);

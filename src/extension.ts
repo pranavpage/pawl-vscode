@@ -1,19 +1,11 @@
 // Thin VS Code adapter: turns editor actions into session events and applies the session's effects.
 import * as vscode from "vscode";
 import { createSession } from "./core/session";
-import type { DocumentSnapshot, Effect, Level, Position } from "./core/types";
+import type { DocumentSnapshot, Effect, Position } from "./core/types";
 import { OpenRouterClient } from "./openrouter";
 import { appendLogEntry } from "./sessionLog";
 
 const KEY_SECRET = "pawl.openrouterKey";
-const DEFAULT_MODELS: Record<Level, string> = {
-  0: "",
-  1: "deepseek/deepseek-v4.1-flash",
-  2: "deepseek/deepseek-v4.1-flash",
-  3: "z-ai/glm-5.3",
-  4: "z-ai/glm-5.3",
-  5: "moonshotai/kimi-k3.1-pro",
-};
 
 interface Ghost {
   docId: string;
@@ -37,7 +29,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let ghost: Ghost | undefined;
 
   const editorFor = (docId: string) =>
-    vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === docId);
+    vscode.window.visibleTextEditors.find((e) => docIdOf(e.document) === docId);
   const toVs = (p: Position) => new vscode.Position(p.line, p.character);
 
   function clearMarker(): void {
@@ -74,11 +66,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }
 
+  // Smoke tests point the client at a local fake; nothing else may redirect the key.
+  const baseUrl = () =>
+    context.extensionMode === vscode.ExtensionMode.Test ? process.env.PAWL_OPENROUTER_BASE_URL : undefined;
   const session = createSession({
-    model: new OpenRouterClient(() => Promise.resolve(secrets.get(KEY_SECRET))),
+    model: new OpenRouterClient(() => Promise.resolve(secrets.get(KEY_SECRET)), baseUrl),
     clock: Date,
-    modelForLevel: (level) =>
-      vscode.workspace.getConfiguration("pawl").get<string>(`models.level${level}`) || DEFAULT_MODELS[level],
+    modelForLevel: (level) => vscode.workspace.getConfiguration("pawl").get<string>(`models.level${level}`) ?? "",
     emit: apply,
   });
   const refreshKey = async () =>
@@ -91,6 +85,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     secrets.onDidChange((e) => {
       if (e.key === KEY_SECRET) void refreshKey();
     }),
+    // A suggestion belongs to the spot it was asked for; it never comes back once the cursor leaves.
+    vscode.window.onDidChangeTextEditorSelection((e) => {
+      if (ghost && (docIdOf(e.textEditor.document) !== ghost.docId || !e.selections[0].active.isEqual(toVs(ghost.at)))) {
+        ghost = undefined;
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor(() => (ghost = undefined)),
 
     vscode.commands.registerCommand("pawl.go", () => {
       const editor = vscode.window.activeTextEditor;
@@ -119,7 +120,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       { pattern: "**" },
       {
         provideInlineCompletionItems(document, position) {
-          if (!ghost || document.uri.toString() !== ghost.docId || !position.isEqual(toVs(ghost.at))) {
+          if (!ghost || docIdOf(document) !== ghost.docId || !position.isEqual(toVs(ghost.at))) {
             return undefined;
           }
           return [
@@ -136,10 +137,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await refreshKey();
 }
 
+const docIdOf = (document: vscode.TextDocument) => document.uri.toString();
+
 function snapshot(editor: vscode.TextEditor): DocumentSnapshot {
   const { document, selection } = editor;
   return {
-    docId: document.uri.toString(),
+    docId: docIdOf(document),
     path: vscode.workspace.asRelativePath(document.uri, false),
     languageId: document.languageId,
     text: document.getText(),

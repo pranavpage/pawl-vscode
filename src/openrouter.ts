@@ -4,7 +4,10 @@ const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
 /** Streams chat completions straight from OpenRouter. The key is read per request and never stored here. */
 export class OpenRouterClient implements ModelClient {
-  constructor(private getKey: () => Promise<string | undefined>) {}
+  constructor(
+    private getKey: () => Promise<string | undefined>,
+    private getBaseUrl: () => string | undefined = () => undefined,
+  ) {}
 
   async *stream(request: ChatRequest, signal: AbortSignal): AsyncIterable<StreamChunk> {
     const key = await this.getKey();
@@ -12,8 +15,7 @@ export class OpenRouterClient implements ModelClient {
 
     let res: Response;
     try {
-      const baseUrl = process.env.PAWL_OPENROUTER_BASE_URL ?? DEFAULT_BASE_URL;
-      res = await fetch(`${baseUrl}/chat/completions`, {
+      res = await fetch(`${this.getBaseUrl() ?? DEFAULT_BASE_URL}/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${key}`,

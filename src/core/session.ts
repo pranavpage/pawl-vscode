@@ -1,4 +1,4 @@
-import { cutAtStopPoint, finish } from "./output";
+import { cutAtStopPoint, cutAtStreamEnd } from "./output";
 import { assembleContext, buildMessages } from "./prompt";
 import { isoWithOffset } from "./time";
 import { ModelError, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type SessionEvent } from "./types";
@@ -21,11 +21,6 @@ const MARKER_TTL_MS = 3000;
 interface Reply {
   suggestion: string;
   provider?: string;
-}
-
-/** True when a model rejected `reasoning: {effort: "none"}`. */
-function rejectsEffortNone(err: unknown): boolean {
-  return err instanceof ModelError && err.kind === "bad_request" && /reasoning|effort/i.test(err.message);
 }
 
 /** The `reason` logged and shown for a failed request. */
@@ -64,7 +59,7 @@ export function createSession(deps: SessionDeps): Session {
         return { suggestion, provider };
       }
     }
-    return { suggestion: finish(raw), provider };
+    return { suggestion: cutAtStreamEnd(raw), provider };
   }
 
   async function requestReply(model: string, base: Omit<ChatRequest, "model" | "reasoning">): Promise<Reply> {
@@ -72,31 +67,35 @@ export function createSession(deps: SessionDeps): Session {
       try {
         return await streamReply({ ...base, model, reasoning: { effort: "none" } });
       } catch (err) {
-        if (!rejectsEffortNone(err)) throw err;
-        excludeReasoning.add(model);
+        // OpenRouter's wording for an unsupported effort varies, so any 400 gets one try with `exclude`.
+        if (!(err instanceof ModelError && err.kind === "bad_request")) throw err;
       }
     }
-    return streamReply({ ...base, model, reasoning: { exclude: true } });
+    const reply = await streamReply({ ...base, model, reasoning: { exclude: true } });
+    excludeReasoning.add(model);
+    return reply;
   }
 
   async function go(doc: DocumentSnapshot): Promise<void> {
     const pressedAt = deps.clock.now();
     const model = deps.modelForLevel(level);
-    const entry = {
+    const press = {
       ts: isoWithOffset(pressedAt),
       file: doc.path,
       lang: doc.languageId,
       level,
       model,
     };
+    const mark = (text: string, ttlMs?: number) =>
+      emit({ type: "marker", docId: doc.docId, at: doc.cursor, text, ttlMs });
     const fail = (reason: string, logged: Partial<LogEntry>) => {
-      emit({ type: "marker", docId: doc.docId, at: doc.cursor, text: `! ${reason.replaceAll("_", " ")}`, ttlMs: MARKER_TTL_MS });
-      emit({ type: "log", entry: { ...entry, context_chars: 0, attempts: 0, ...logged, outcome: "error", reason } });
+      mark(`! ${reason.replaceAll("_", " ")}`, MARKER_TTL_MS);
+      emit({ type: "log", entry: { ...press, context_chars: 0, attempts: 0, ...logged, outcome: "error", reason } });
     };
 
     if (!hasKey) return fail("no_key", {});
 
-    emit({ type: "marker", docId: doc.docId, at: doc.cursor, text: "…" });
+    mark("…");
     const context = assembleContext(doc);
     const context_chars = context.before.length + context.after.length;
     let reply: Reply;
@@ -112,7 +111,7 @@ export function createSession(deps: SessionDeps): Session {
 
     lastLatency = deps.clock.now() - pressedAt;
     const shown = {
-      ...entry,
+      ...press,
       provider: reply.provider,
       context_chars,
       suggestion: reply.suggestion,
@@ -121,7 +120,7 @@ export function createSession(deps: SessionDeps): Session {
     };
     showStatus();
     if (reply.suggestion.trim() === "") {
-      emit({ type: "marker", docId: doc.docId, at: doc.cursor, text: "· nothing to add", ttlMs: MARKER_TTL_MS });
+      mark("· nothing to add", MARKER_TTL_MS);
       emit({ type: "log", entry: { ...shown, outcome: "empty" } });
       return;
     }

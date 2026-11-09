@@ -18,7 +18,11 @@ async function main(): Promise<void> {
       `--user-data-dir=${join(scratch, "user-data")}`,
       `--remote-debugging-port=${DEVTOOLS_PORT}`,
     ],
-    extensionTestsEnv: { PAWL_HOME: join(scratch, "pawl"), PAWL_DEVTOOLS_PORT: String(DEVTOOLS_PORT) },
+    extensionTestsEnv: {
+      PAWL_HOME: join(scratch, "pawl"),
+      PAWL_DEVTOOLS_PORT: String(DEVTOOLS_PORT),
+      PAWL_USER_DATA_DIR: join(scratch, "user-data"),
+    },
   });
 }
 
