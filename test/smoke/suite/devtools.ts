@@ -5,11 +5,20 @@
 export interface DevTools {
   /** The ghost text currently rendered in the editor, if any. */
   ghostText(): Promise<string | undefined>;
-  pressKey(key: "Tab"): Promise<void>;
+  /** The text of Pawl's status bar item. */
+  statusText(): Promise<string | undefined>;
+  pressKey(key: Key, modifiers?: { alt?: boolean }): Promise<void>;
   close(): void;
 }
 
-const KEY_CODES = { Tab: 9 } as const;
+const KEYS = {
+  Tab: { code: "Tab", keyCode: 9 },
+  "=": { code: "Equal", keyCode: 187 },
+  "-": { code: "Minus", keyCode: 189 },
+  "0": { code: "Digit0", keyCode: 48 },
+} as const;
+type Key = keyof typeof KEYS;
+const ALT = 1;
 
 export async function connectDevTools(): Promise<DevTools> {
   const port = process.env.PAWL_DEVTOOLS_PORT;
@@ -48,9 +57,22 @@ export async function connectDevTools(): Promise<DevTools> {
       });
       return result.value || undefined;
     },
-    async pressKey(key) {
-      const code = KEY_CODES[key];
-      const event = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
+    async statusText() {
+      const { result } = await send("Runtime.evaluate", {
+        expression: `[...document.querySelectorAll(".statusbar-item")].map((e) => e.textContent.trim()).find((t) => t.startsWith("Pawl"))`,
+        returnByValue: true,
+      });
+      return result.value;
+    },
+    async pressKey(key, { alt = false } = {}) {
+      const { code, keyCode } = KEYS[key];
+      const event = {
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+        modifiers: alt ? ALT : 0,
+      };
       await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...event });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
     },

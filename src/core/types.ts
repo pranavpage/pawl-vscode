@@ -2,6 +2,16 @@
 
 export type Level = 0 | 1 | 2 | 3 | 4 | 5;
 
+/** The dial, as shown in the level list. */
+export const LEVELS: readonly { level: Level; name: string; writes: string }[] = [
+  { level: 0, name: "Off", writes: "Nothing" },
+  { level: 1, name: "Syntax", writes: "Finishes the line" },
+  { level: 2, name: "Sentence", writes: "Finishes the statement" },
+  { level: 3, name: "Block", writes: "Writes the block you're in" },
+  { level: 4, name: "Skeleton", writes: "Fills the empty function or TODO: you're in" },
+  { level: 5, name: "Plan step", writes: "Writes the next unchecked step of a plan comment" },
+];
+
 export interface Position {
   line: number;
   character: number;
@@ -22,9 +32,15 @@ export interface DocumentSnapshot {
 export type SessionEvent =
   | { type: "keyChanged"; hasKey: boolean }
   | { type: "go"; doc: DocumentSnapshot }
-  | { type: "accepted" };
+  | { type: "accepted" }
+  /** The active editor changed, or its text did. Undefined when no text editor is active. */
+  | { type: "activeDocChanged"; doc?: Pick<DocumentSnapshot, "languageId" | "text"> }
+  | { type: "levelUp" }
+  | { type: "levelDown" }
+  /** The off key (level 0) or a pick from the level list. */
+  | { type: "setLevel"; level: Level };
 
-export type Outcome = "accepted" | "empty" | "error";
+export type Outcome = "accepted" | "empty" | "error" | "off";
 
 export interface LogEntry {
   ts: string;
@@ -46,8 +62,12 @@ export type Effect =
   /** A faint marker at the cursor; cleared after `ttlMs` if given. */
   | { type: "marker"; docId: string; at: Position; text: string; ttlMs?: number }
   | { type: "clearMarker" }
+  /** A short message not tied to the cursor, e.g. for a level key. */
+  | { type: "notice"; text: string; ttlMs: number }
   | { type: "ghost"; docId: string; at: Position; text: string }
   | { type: "clearGhost" }
+  /** The global level changed; persist it so it survives a restart. */
+  | { type: "saveLevel"; level: Level }
   | { type: "log"; entry: LogEntry };
 
 export interface ChatMessage {

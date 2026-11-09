@@ -1,3 +1,4 @@
+import { findPin, type Pin } from "./markers";
 import { cutAtStopPoint, cutAtStreamEnd } from "./output";
 import { assembleContext, buildMessages } from "./prompt";
 import { isoWithOffset } from "./time";
@@ -7,6 +8,8 @@ export interface SessionDeps {
   model: ModelClient;
   clock: Clock;
   modelForLevel(level: Level): string;
+  /** The saved global level; 1 on first run. */
+  level?: Level;
   emit(effect: Effect): void;
 }
 
@@ -31,17 +34,51 @@ function errorReason(err: unknown): string {
 
 export function createSession(deps: SessionDeps): Session {
   const { emit } = deps;
-  const level: Level = 1;
+  /** The dial; 0 also overrides every pin. */
+  let level: Level = deps.level ?? 1;
+  /** The pin in the active file, which sets the status bar. */
+  let activePin: Pin;
   let hasKey = false;
   let lastLatency: number | undefined;
   /** The log line for the suggestion on screen, written once its outcome is known. */
   let armed: Omit<LogEntry, "outcome"> | undefined;
 
+  /** The level a press in a file with this pin runs at. */
+  function effectiveLevel(pin: Pin): Level {
+    if (level === 0 || pin === undefined || pin === "bad") return level;
+    return pin.level;
+  }
+
+  /** Moves the dial, unless a pin in the active file holds it. Only the off key overrides a pin. */
+  function turnDial(next: Level): void {
+    if (level !== 0 && typeof activePin === "object") {
+      emit({ type: "notice", text: "pinned by @pawl, remove it to use the dial", ttlMs: MARKER_TTL_MS });
+      return;
+    }
+    setLevel(next);
+  }
+
+  function setLevel(next: Level): void {
+    if (next !== level) {
+      level = next;
+      emit({ type: "saveLevel", level });
+    }
+    showStatus();
+  }
+
+  function statusText(): string {
+    const shown = effectiveLevel(activePin);
+    if (shown === 0) return "Pawl off";
+    if (!hasKey) return "Pawl ! no key";
+    if (activePin === "bad") return "Pawl ! bad @pawl";
+    const parts = [`Pawl ${shown}`];
+    if (activePin) parts.push("pinned");
+    if (lastLatency !== undefined) parts.push(`${lastLatency} ms`);
+    return parts.join(" · ");
+  }
+
   function showStatus(): void {
-    let text = `Pawl ${level}`;
-    if (!hasKey) text = "Pawl ! no key";
-    else if (lastLatency !== undefined) text += ` · ${lastLatency} ms`;
-    emit({ type: "status", text });
+    emit({ type: "status", text: statusText() });
   }
   /** Models known to reject `effort: "none"`; they get `exclude` straight away. */
   const excludeReasoning = new Set<string>();
@@ -78,16 +115,19 @@ export function createSession(deps: SessionDeps): Session {
 
   async function go(doc: DocumentSnapshot): Promise<void> {
     const pressedAt = deps.clock.now();
-    const model = deps.modelForLevel(level);
-    const press = {
-      ts: isoWithOffset(pressedAt),
-      file: doc.path,
-      lang: doc.languageId,
-      level,
-      model,
-    };
     const mark = (text: string, ttlMs?: number) =>
       emit({ type: "marker", docId: doc.docId, at: doc.cursor, text, ttlMs });
+    const level = effectiveLevel(findPin(doc));
+    const pressed = { ts: isoWithOffset(pressedAt), file: doc.path, lang: doc.languageId, level };
+
+    if (level === 0) {
+      mark("Pawl off", MARKER_TTL_MS);
+      emit({ type: "log", entry: { ...pressed, context_chars: 0, attempts: 0, outcome: "off" } });
+      return;
+    }
+
+    const model = deps.modelForLevel(level);
+    const press = { ...pressed, model };
     const fail = (reason: string, logged: Partial<LogEntry>) => {
       mark(`! ${reason.replaceAll("_", " ")}`, MARKER_TTL_MS);
       emit({ type: "log", entry: { ...press, context_chars: 0, attempts: 0, ...logged, outcome: "error", reason } });
@@ -142,10 +182,19 @@ export function createSession(deps: SessionDeps): Session {
         case "keyChanged":
           hasKey = event.hasKey;
           return showStatus();
+        case "activeDocChanged":
+          activePin = event.doc && findPin(event.doc);
+          return showStatus();
         case "go":
           return go(event.doc);
         case "accepted":
           return accepted();
+        case "levelUp":
+          return turnDial(Math.min(5, level + 1) as Level);
+        case "levelDown":
+          return turnDial(Math.max(0, level - 1) as Level);
+        case "setLevel":
+          return event.level === 0 ? setLevel(0) : turnDial(event.level);
       }
     },
   };
