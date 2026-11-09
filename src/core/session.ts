@@ -43,22 +43,26 @@ export function createSession(deps: SessionDeps): Session {
   /** The log line for the suggestion on screen, written once its outcome is known. */
   let armed: Omit<LogEntry, "outcome"> | undefined;
 
+  /** The level a valid pin holds the file at; none while the dial is at 0, which overrides every pin. */
+  function pinnedLevel(pin: Pin): Level | undefined {
+    return level !== 0 && typeof pin === "object" ? pin.level : undefined;
+  }
+
   /** The level a press in a file with this pin runs at. */
   function effectiveLevel(pin: Pin): Level {
-    if (level === 0 || pin === undefined || pin === "bad") return level;
-    return pin.level;
+    return pinnedLevel(pin) ?? level;
   }
 
   /** Moves the dial, unless a pin in the active file holds it. Only the off key overrides a pin. */
   function turnDial(next: Level): void {
-    if (level !== 0 && typeof activePin === "object") {
+    if (pinnedLevel(activePin) !== undefined) {
       emit({ type: "notice", text: "pinned by @pawl, remove it to use the dial", ttlMs: MARKER_TTL_MS });
       return;
     }
-    setLevel(next);
+    setGlobalLevel(next);
   }
 
-  function setLevel(next: Level): void {
+  function setGlobalLevel(next: Level): void {
     if (next !== level) {
       level = next;
       emit({ type: "saveLevel", level });
@@ -67,12 +71,13 @@ export function createSession(deps: SessionDeps): Session {
   }
 
   function statusText(): string {
+    const pinned = pinnedLevel(activePin) !== undefined;
     const shown = effectiveLevel(activePin);
-    if (shown === 0) return "Pawl off";
+    if (shown === 0) return pinned ? "Pawl off · pinned" : "Pawl off";
     if (!hasKey) return "Pawl ! no key";
     if (activePin === "bad") return "Pawl ! bad @pawl";
     const parts = [`Pawl ${shown}`];
-    if (activePin) parts.push("pinned");
+    if (pinned) parts.push("pinned");
     if (lastLatency !== undefined) parts.push(`${lastLatency} ms`);
     return parts.join(" · ");
   }
@@ -194,7 +199,7 @@ export function createSession(deps: SessionDeps): Session {
         case "levelDown":
           return turnDial(Math.max(0, level - 1) as Level);
         case "setLevel":
-          return event.level === 0 ? setLevel(0) : turnDial(event.level);
+          return event.level === 0 ? setGlobalLevel(0) : turnDial(event.level);
       }
     },
   };

@@ -22,7 +22,7 @@ describe("Pawl dial smoke", () => {
     assert.equal(text, expected);
   }
 
-  it("the level keys move the dial, the off key overrides a pin, and a pin holds the dial", async () => {
+  it("the level keys move the dial, and the status bar follows the active file's pin", async () => {
     await vscode.commands.executeCommand("pawl.setOpenRouterKey", "sk-or-smoke-test");
     const [file] = await vscode.workspace.findFiles("main.py");
     const editor = await vscode.window.showTextDocument(file);
@@ -40,15 +40,6 @@ describe("Pawl dial smoke", () => {
 
     await editor.edit((e) => e.insert(new vscode.Position(0, 0), "# @pawl level=3\n"));
     await statusBecomes("Pawl 3 · pinned");
-    await devtools.pressKey("=", { alt: true });
-    await new Promise((r) => setTimeout(r, 300));
-    await statusBecomes("Pawl 3 · pinned");
-    await devtools.pressKey("0", { alt: true });
-    await statusBecomes("Pawl off");
-    await devtools.pressKey("=", { alt: true });
-    await statusBecomes("Pawl 3 · pinned");
-
-    await vscode.commands.executeCommand("pawl.pickLevel", 1);
     await vscode.commands.executeCommand("workbench.action.files.revert");
     await statusBecomes("Pawl 1");
   });

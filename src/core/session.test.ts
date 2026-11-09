@@ -394,6 +394,16 @@ describe("a pinned file", () => {
   });
 });
 
+describe("a file pinned to level 0", () => {
+  it("says it is pinned off, so the dial not moving makes sense", async () => {
+    const { session, of } = setup();
+
+    await session.dispatch({ type: "activeDocChanged", doc: doc("# @pawl level=0\nprint(|") });
+
+    expect(of("status").at(-1)).toEqual({ type: "status", text: "Pawl off · pinned" });
+  });
+});
+
 describe("an invalid pin", () => {
   it.each(["@pawl level=7", "@pawl level=x", "@pawl level=", "@pawl level=12", "@pawl"])(
     "(%s) shows Pawl ! bad @pawl and the global level applies",
