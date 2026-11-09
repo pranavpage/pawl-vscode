@@ -26,13 +26,27 @@ export interface DocumentSnapshot {
   /** VS Code language ID. */
   languageId: string;
   text: string;
+  /** The main cursor: suggestions only ever go here. */
   cursor: Position;
+  /** How many cursors the editor has, the main one included. */
+  cursorCount: number;
+  /** True when the main selection isn't empty. */
+  hasSelection: boolean;
 }
 
 export type SessionEvent =
   | { type: "keyChanged"; hasKey: boolean }
   | { type: "go"; doc: DocumentSnapshot }
   | { type: "accepted" }
+  /** Pawl's accept-next-word command ran; the word itself arrives as an edit. */
+  | { type: "acceptedWord" }
+  /** Esc on a suggestion. */
+  | { type: "rejected" }
+  /** Text changed: `removed` characters at `at` were replaced by `text`. */
+  | { type: "edited"; docId: string; at: Position; removed: number; text: string }
+  /** The main cursor moved, by typing or otherwise. */
+  | { type: "cursorMoved"; docId: string; at: Position }
+  | { type: "editorChanged" }
   /** The active editor changed, or its text did. Undefined when no text editor is active. */
   | { type: "activeDocChanged"; doc?: Pick<DocumentSnapshot, "languageId" | "text"> }
   | { type: "levelUp" }
@@ -40,7 +54,7 @@ export type SessionEvent =
   /** The off key (level 0) or a pick from the level list. */
   | { type: "setLevel"; level: Level };
 
-export type Outcome = "accepted" | "empty" | "error" | "off";
+export type Outcome = "accepted" | "partial" | "rejected" | "dismissed" | "empty" | "error" | "cancelled" | "off";
 
 export interface LogEntry {
   ts: string;
@@ -50,11 +64,15 @@ export interface LogEntry {
   model?: string;
   provider?: string;
   context_chars: number;
+  /** Only when `pawl.log.prompts` is on. */
+  prompt?: ChatMessage[];
   suggestion?: string;
   latency_ms?: number;
   attempts: number;
   outcome: Outcome;
   reason?: string;
+  /** For `partial`: how much of the suggestion ended up in the file. */
+  accepted_chars?: number;
 }
 
 export type Effect =
@@ -66,6 +84,8 @@ export type Effect =
   | { type: "notice"; text: string; ttlMs: number }
   | { type: "ghost"; docId: string; at: Position; text: string }
   | { type: "clearGhost" }
+  /** Leaves only the main cursor, with nothing selected. */
+  | { type: "collapseSelection"; docId: string; at: Position }
   /** The global level changed; persist it so it survives a restart. */
   | { type: "saveLevel"; level: Level }
   | { type: "log"; entry: LogEntry };
@@ -111,4 +131,6 @@ export interface ModelClient {
 export interface Clock {
   /** Milliseconds since the epoch. */
   now(): number;
+  /** Calls `fn` once, `ms` from now. Returns a function that cancels it. */
+  after(ms: number, fn: () => void): () => void;
 }

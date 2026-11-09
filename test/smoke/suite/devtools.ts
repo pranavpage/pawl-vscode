@@ -7,18 +7,24 @@ export interface DevTools {
   ghostText(): Promise<string | undefined>;
   /** The text of Pawl's status bar item. */
   statusText(): Promise<string | undefined>;
-  pressKey(key: Key, modifiers?: { alt?: boolean }): Promise<void>;
+  /** Presses a key; `mod` is Cmd on macOS and Ctrl elsewhere. */
+  pressKey(key: Key, modifiers?: { alt?: boolean; mod?: boolean }): Promise<void>;
   close(): void;
 }
 
 const KEYS = {
   Tab: { code: "Tab", keyCode: 9 },
+  Escape: { code: "Escape", keyCode: 27 },
+  ArrowRight: { code: "ArrowRight", keyCode: 39 },
   "=": { code: "Equal", keyCode: 187 },
   "-": { code: "Minus", keyCode: 189 },
   "0": { code: "Digit0", keyCode: 48 },
 } as const;
 type Key = keyof typeof KEYS;
+// CDP modifier bits.
 const ALT = 1;
+const CTRL = 2;
+const META = 4;
 
 export async function connectDevTools(): Promise<DevTools> {
   const port = process.env.PAWL_DEVTOOLS_PORT;
@@ -64,14 +70,14 @@ export async function connectDevTools(): Promise<DevTools> {
       });
       return result.value;
     },
-    async pressKey(key, { alt = false } = {}) {
+    async pressKey(key, { alt = false, mod = false } = {}) {
       const { code, keyCode } = KEYS[key];
       const event = {
         key,
         code,
         windowsVirtualKeyCode: keyCode,
         nativeVirtualKeyCode: keyCode,
-        modifiers: alt ? ALT : 0,
+        modifiers: (alt ? ALT : 0) | (mod ? (process.platform === "darwin" ? META : CTRL) : 0),
       };
       await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...event });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });

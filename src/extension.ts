@@ -1,12 +1,30 @@
 // Thin VS Code adapter: turns editor actions into session events and applies the session's effects.
 import * as vscode from "vscode";
-import { createSession } from "./core/session";
-import { LEVELS, type DocumentSnapshot, type Effect, type Level, type Position } from "./core/types";
+import { createSession, type SessionConfig } from "./core/session";
+import { LEVELS, type Clock, type DocumentSnapshot, type Effect, type Level, type Position } from "./core/types";
 import { OpenRouterClient } from "./openrouter";
 import { appendLogEntry } from "./sessionLog";
 
 const KEY_SECRET = "pawl.openrouterKey";
 const LEVEL_STATE = "pawl.level";
+/** Context key the Esc and accept-next-word keybindings check, so they only wrap Pawl's suggestions. */
+const VISIBLE_KEY = "pawl.suggestionVisible";
+
+const clock: Clock = {
+  now: () => Date.now(),
+  after(ms, fn) {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  },
+};
+
+function readConfig(): SessionConfig {
+  const config = vscode.workspace.getConfiguration("pawl");
+  return {
+    timeoutMs: config.get("timeout") === "4s" ? 4000 : 8000,
+    log: { enabled: config.get("log.enabled", true), prompts: config.get("log.prompts", false) },
+  };
+}
 
 interface Ghost {
   docId: string;
@@ -40,6 +58,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     for (const editor of vscode.window.visibleTextEditors) editor.setDecorations(marker, []);
   }
 
+  const setVisible = (visible: boolean) => vscode.commands.executeCommand("setContext", VISIBLE_KEY, visible);
+
   function apply(effect: Effect): void {
     switch (effect.type) {
       case "status":
@@ -61,11 +81,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       case "ghost":
         ghost = { docId: effect.docId, at: effect.at, text: effect.text };
+        void setVisible(true);
         void vscode.commands.executeCommand("editor.action.inlineSuggest.trigger");
         return;
       case "clearGhost":
         ghost = undefined;
+        void setVisible(false);
+        void vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
         return;
+      case "collapseSelection": {
+        const editor = editorFor(effect.docId);
+        if (editor) editor.selections = [new vscode.Selection(toVs(effect.at), toVs(effect.at))];
+        return;
+      }
       case "saveLevel":
         void globalState.update(LEVEL_STATE, effect.level);
         return;
@@ -80,8 +108,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.extensionMode === vscode.ExtensionMode.Test ? process.env.PAWL_OPENROUTER_BASE_URL : undefined;
   const session = createSession({
     model: new OpenRouterClient(() => Promise.resolve(secrets.get(KEY_SECRET)), baseUrl),
-    clock: Date,
+    clock,
     modelForLevel: (level) => vscode.workspace.getConfiguration("pawl").get<string>(`models.level${level}`) ?? "",
+    config: readConfig,
     level: LEVELS.find((l) => l.level === globalState.get(LEVEL_STATE))?.level,
     emit: apply,
   });
@@ -103,18 +132,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     secrets.onDidChange((e) => {
       if (e.key === KEY_SECRET) void refreshKey();
     }),
-    // A suggestion belongs to the spot it was asked for; it never comes back once the cursor leaves.
-    vscode.window.onDidChangeTextEditorSelection((e) => {
-      if (ghost && (docIdOf(e.textEditor.document) !== ghost.docId || !e.selections[0].active.isEqual(toVs(ghost.at)))) {
-        ghost = undefined;
+    // The core decides what typing, moving and switching editors do to a request or suggestion.
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      const docId = docIdOf(e.document);
+      for (const change of e.contentChanges) {
+        const { start } = change.range;
+        void session.dispatch({
+          type: "edited",
+          docId,
+          at: { line: start.line, character: start.character },
+          removed: change.rangeLength,
+          text: change.text,
+        });
       }
+      if (e.document === vscode.window.activeTextEditor?.document) void refreshActiveDoc();
+    }),
+    vscode.window.onDidChangeTextEditorSelection((e) => {
+      const { active } = e.selections[0];
+      void session.dispatch({
+        type: "cursorMoved",
+        docId: docIdOf(e.textEditor.document),
+        at: { line: active.line, character: active.character },
+      });
     }),
     vscode.window.onDidChangeActiveTextEditor(() => {
-      ghost = undefined;
+      void session.dispatch({ type: "editorChanged" });
       void refreshActiveDoc();
-    }),
-    vscode.workspace.onDidChangeTextDocument((e) => {
-      if (e.document === vscode.window.activeTextEditor?.document) void refreshActiveDoc();
     }),
 
     vscode.commands.registerCommand("pawl.go", () => {
@@ -154,15 +197,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Runs after VS Code inserts an item (Tab).
     vscode.commands.registerCommand("pawl._accepted", () => session.dispatch({ type: "accepted" })),
 
+    // Esc and accept-next-word wrap VS Code's own commands so the core can log them.
+    vscode.commands.registerCommand("pawl.reject", async () => {
+      await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+      await session.dispatch({ type: "rejected" });
+    }),
+    vscode.commands.registerCommand("pawl.acceptNextWord", async () => {
+      await vscode.commands.executeCommand("editor.action.inlineSuggest.acceptNextWord");
+      await session.dispatch({ type: "acceptedWord" });
+    }),
+
     vscode.languages.registerInlineCompletionItemProvider(
       { pattern: "**" },
       {
         provideInlineCompletionItems(document, position) {
-          if (!ghost || docIdOf(document) !== ghost.docId || !position.isEqual(toVs(ghost.at))) {
-            return undefined;
-          }
+          if (!ghost || docIdOf(document) !== ghost.docId) return undefined;
+          // While the user types through it, the same item stays, spanning what they've typed.
+          const start = toVs(ghost.at);
+          if (position.isBefore(start)) return undefined;
+          const typed = new vscode.Range(start, position);
+          if (!ghost.text.startsWith(document.getText(typed))) return undefined;
           return [
-            new vscode.InlineCompletionItem(ghost.text, new vscode.Range(position, position), {
+            new vscode.InlineCompletionItem(ghost.text, typed, {
               title: "Accept Pawl suggestion",
               command: "pawl._accepted",
             }),
@@ -217,13 +273,15 @@ async function checkCopilot(): Promise<void> {
 }
 
 function snapshot(editor: vscode.TextEditor): DocumentSnapshot {
-  const { document, selection } = editor;
+  const { document, selection, selections } = editor;
   return {
     docId: docIdOf(document),
     path: vscode.workspace.asRelativePath(document.uri, false),
     languageId: document.languageId,
     text: document.getText(),
     cursor: { line: selection.active.line, character: selection.active.character },
+    cursorCount: selections.length,
+    hasSelection: !selection.isEmpty,
   };
 }
 

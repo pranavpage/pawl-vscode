@@ -64,6 +64,17 @@
       {
         "command": "pawl.off",
         "key": "alt+0"
+      },
+      {
+        "command": "pawl.reject",
+        "key": "escape",
+        "when": "editorTextFocus && inlineSuggestionVisible && pawl.suggestionVisible"
+      },
+      {
+        "command": "pawl.acceptNextWord",
+        "key": "ctrl+right",
+        "mac": "cmd+right",
+        "when": "editorTextFocus && !editorReadonly && inlineSuggestionVisible && pawl.suggestionVisible"
       }
     ],
     "configuration": {
@@ -98,6 +109,25 @@
           "default": "moonshotai/kimi-k3.1-pro",
           "description": "OpenRouter model ID used at level 5 (Plan step). Any OpenRouter model works on any level.",
           "order": 4
+        },
+        "pawl.timeout": {
+          "type": "string",
+          "enum": [
+            "4s",
+            "8s"
+          ],
+          "default": "8s",
+          "markdownDescription": "How long one go-press may take, retries included, before Pawl gives up and shows `! timeout`. `4s` may time out at levels 3–5."
+        },
+        "pawl.log.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Append one line per go-press to `~/.pawl/sessions/YYYY-MM-DD.jsonl`."
+        },
+        "pawl.log.prompts": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Add the full prompt, which includes your code, to each session log line."
         }
       }
     }
