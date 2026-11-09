@@ -5,11 +5,16 @@
 export interface DevTools {
   /** The ghost text currently rendered in the editor, if any. */
   ghostText(): Promise<string | undefined>;
-  pressKey(key: "Tab"): Promise<void>;
+  /** Presses a key; `mod` is Cmd on macOS and Ctrl elsewhere. */
+  pressKey(key: keyof typeof KEY_CODES, options?: { mod?: boolean }): Promise<void>;
   close(): void;
 }
 
-const KEY_CODES = { Tab: 9 } as const;
+const KEY_CODES = { Tab: 9, Escape: 27, ArrowRight: 39 } as const;
+
+// CDP modifier bits.
+const CTRL = 2;
+const META = 4;
 
 export async function connectDevTools(): Promise<DevTools> {
   const port = process.env.PAWL_DEVTOOLS_PORT;
@@ -48,9 +53,10 @@ export async function connectDevTools(): Promise<DevTools> {
       });
       return result.value || undefined;
     },
-    async pressKey(key) {
+    async pressKey(key, { mod = false } = {}) {
       const code = KEY_CODES[key];
-      const event = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code };
+      const modifiers = mod ? (process.platform === "darwin" ? META : CTRL) : 0;
+      const event = { key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code, modifiers };
       await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...event });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
     },

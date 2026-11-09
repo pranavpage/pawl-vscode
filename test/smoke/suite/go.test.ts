@@ -6,8 +6,9 @@ import { join } from "node:path";
 import * as vscode from "vscode";
 import { connectDevTools, type DevTools } from "./devtools";
 
-/** A stand-in for OpenRouter that streams one scripted reply per request and records what was sent. */
-function fakeOpenRouter(reply: string[]) {
+/** A stand-in for OpenRouter that streams the next scripted reply per request and records what was sent. */
+function fakeOpenRouter() {
+  const replies: string[][] = [];
   const requests: { headers: Record<string, unknown>; body: any }[] = [];
   const server: Server = createServer((req, res) => {
     let body = "";
@@ -16,13 +17,13 @@ function fakeOpenRouter(reply: string[]) {
       requests.push({ headers: req.headers, body: JSON.parse(body) });
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write(": OPENROUTER PROCESSING\n\n");
-      for (const content of reply) {
+      for (const content of replies.shift() ?? []) {
         res.write(`data: ${JSON.stringify({ provider: "FakeProvider", choices: [{ delta: { content } }] })}\n\n`);
       }
       res.end("data: [DONE]\n\n");
     });
   });
-  return { server, requests };
+  return { server, requests, replies };
 }
 
 async function waitFor<T>(
@@ -39,9 +40,27 @@ async function waitFor<T>(
   }
 }
 
+/** Every session log line written so far. */
+function logLines(): string[] {
+  const dir = join(process.env.PAWL_HOME!, "sessions");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).flatMap((log) => readFileSync(join(dir, log), "utf8").trim().split("\n"));
+}
+
 describe("Pawl smoke", () => {
-  const openRouter = fakeOpenRouter(["```python\n", "name)\n", "    return name\n"]);
+  const openRouter = fakeOpenRouter();
   let devtools: DevTools;
+  let editor: vscode.TextEditor;
+  let original: string;
+  /** Log lines written before the current test. */
+  let logged: number;
+
+  /** Waits for the current test's single log line and returns it. */
+  async function logEntry() {
+    const lines = await waitFor(() => logLines().length > logged && logLines(), "the session log line");
+    assert.equal(lines.length, logged + 1, "one log line per go-press");
+    return JSON.parse(lines[logged]);
+  }
 
   before(async () => {
     await new Promise<void>((r) => openRouter.server.listen(0, "127.0.0.1", r));
@@ -49,6 +68,22 @@ describe("Pawl smoke", () => {
     process.env.PAWL_OPENROUTER_BASE_URL = `http://127.0.0.1:${port}/api/v1`;
     await vscode.extensions.getExtension("pranavpage.pawl")!.activate();
     devtools = await connectDevTools();
+    await vscode.commands.executeCommand("pawl.setOpenRouterKey", "sk-or-smoke-test");
+    const [file] = await vscode.workspace.findFiles("main.py");
+    editor = await vscode.window.showTextDocument(file);
+    original = editor.document.getText();
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+    const cursor = new vscode.Position(1, 10);
+    editor.selection = new vscode.Selection(cursor, cursor);
+    logged = logLines().length;
+  });
+
+  afterEach(async () => {
+    await vscode.commands.executeCommand("workbench.action.files.revert");
+    assert.equal(editor.document.getText(), original);
   });
 
   after(() => {
@@ -57,13 +92,7 @@ describe("Pawl smoke", () => {
   });
 
   it("go arms a suggestion that Tab inserts, and logs the accept", async () => {
-    await vscode.commands.executeCommand("pawl.setOpenRouterKey", "sk-or-smoke-test");
-    const [file] = await vscode.workspace.findFiles("main.py");
-    const editor = await vscode.window.showTextDocument(file);
-    const original = editor.document.getText();
-    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
-    const cursor = new vscode.Position(1, 10);
-    editor.selection = new vscode.Selection(cursor, cursor);
+    openRouter.replies.push(["```python\n", "name)\n", "    return name\n"]);
 
     // Typing and pausing never sends a request.
     await vscode.commands.executeCommand("type", { text: "x" });
@@ -85,28 +114,59 @@ describe("Pawl smoke", () => {
     assert.equal(editor.document.lineAt(1).text, "    print(name)");
     assert.equal(editor.document.lineAt(2).text, "", "only the current line is completed");
 
-    const logDir = join(process.env.PAWL_HOME!, "sessions");
-    const lines = await waitFor(() => {
-      try {
-        const [log] = readdirSync(logDir);
-        return log && readFileSync(join(logDir, log), "utf8").trim().split("\n");
-      } catch {
-        return undefined;
-      }
-    }, "the session log line");
-    assert.equal(lines.length, 1);
-    const entry = JSON.parse(lines[0]);
+    const entry = await logEntry();
     assert.equal(entry.outcome, "accepted");
     assert.equal(entry.suggestion, "name)");
     assert.equal(entry.provider, "FakeProvider");
-    assert.ok(!lines[0].includes("sk-or-smoke-test"), "the key never appears in the log");
+    assert.ok(!logLines().some((l) => l.includes("sk-or-smoke-test")), "the key never appears in the log");
     const settings = join(process.env.PAWL_USER_DATA_DIR!, "User", "settings.json");
     assert.ok(
       !existsSync(settings) || !readFileSync(settings, "utf8").includes("sk-or-smoke-test"),
       "the key never appears in settings.json",
     );
+  });
 
-    await vscode.commands.executeCommand("workbench.action.files.revert");
-    assert.equal(editor.document.getText(), original);
+  it("Esc hides the suggestion and logs it as rejected", async () => {
+    openRouter.replies.push(["name)\n"]);
+
+    await vscode.commands.executeCommand("pawl.go");
+    await waitFor(() => devtools.ghostText(), "ghost text");
+    await devtools.pressKey("Escape");
+    await waitFor(async () => !(await devtools.ghostText()), "the ghost text to go");
+
+    assert.equal(editor.document.lineAt(1).text, "    print(");
+    assert.equal((await logEntry()).outcome, "rejected");
+  });
+
+  it("the suggestion stays while typed through, and Tab then accepts the rest", async () => {
+    openRouter.replies.push(["name)\n"]);
+
+    await vscode.commands.executeCommand("pawl.go");
+    await waitFor(() => devtools.ghostText(), "ghost text");
+    await vscode.commands.executeCommand("type", { text: "n" });
+    await vscode.commands.executeCommand("type", { text: "a" });
+    await waitFor(async () => (await devtools.ghostText()) === "me)", "the rest to stay as ghost text");
+    await devtools.pressKey("Tab");
+    await waitFor(() => editor.document.lineAt(1).text === "    print(name)", "Tab to insert the rest");
+
+    assert.equal((await logEntry()).outcome, "accepted");
+  });
+
+  it("accept-next-word takes one word and logs partial once the rest is rejected", async () => {
+    openRouter.replies.push(["name, end='')\n"]);
+
+    await vscode.commands.executeCommand("pawl.go");
+    await waitFor(() => devtools.ghostText(), "ghost text");
+    await devtools.pressKey("ArrowRight", { mod: true });
+    const line = await waitFor(() => {
+      const text = editor.document.lineAt(1).text;
+      return text !== "    print(" && text;
+    }, "the next word to be inserted");
+    assert.ok("    print(name, end='')".startsWith(line) && line.length < "    print(name, end='')".length);
+    await devtools.pressKey("Escape");
+
+    const entry = await logEntry();
+    assert.equal(entry.outcome, "partial");
+    assert.equal(entry.accepted_chars, line.length - "    print(".length);
   });
 });

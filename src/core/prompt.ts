@@ -16,7 +16,10 @@ export function assembleContext(doc: DocumentSnapshot): Context {
   return { before, after };
 }
 
-export function buildMessages(doc: DocumentSnapshot, context: Context): ChatMessage[] {
+/** `notThis` is a suggestion the user just rejected at this spot. */
+export function buildMessages(doc: DocumentSnapshot, context: Context, notThis?: string): ChatMessage[] {
+  let file = `File: ${doc.path} (${doc.languageId})\n\n${context.before}${CURSOR}${context.after}`;
+  if (notThis) file += `\n\nThe user rejected this completion; reply with a different one:\n${notThis}`;
   return [
     {
       role: "system",
@@ -30,7 +33,7 @@ export function buildMessages(doc: DocumentSnapshot, context: Context): ChatMess
     },
     {
       role: "user",
-      content: `File: ${doc.path} (${doc.languageId})\n\n${context.before}${CURSOR}${context.after}`,
+      content: file,
     },
   ];
 }

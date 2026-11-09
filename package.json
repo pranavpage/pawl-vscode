@@ -36,6 +36,17 @@
         "command": "pawl.go",
         "key": "alt+enter",
         "when": "editorTextFocus && !findWidgetVisible && !notebookEditorFocused"
+      },
+      {
+        "command": "pawl.reject",
+        "key": "escape",
+        "when": "editorTextFocus && inlineSuggestionVisible && pawl.suggestionVisible"
+      },
+      {
+        "command": "pawl.acceptNextWord",
+        "key": "ctrl+right",
+        "mac": "cmd+right",
+        "when": "editorTextFocus && !editorReadonly && inlineSuggestionVisible && pawl.suggestionVisible"
       }
     ],
     "configuration": {
@@ -45,6 +56,25 @@
           "type": "string",
           "default": "deepseek/deepseek-v4.1-flash",
           "description": "OpenRouter model ID used at level 1 (Syntax)."
+        },
+        "pawl.timeout": {
+          "type": "string",
+          "enum": [
+            "4s",
+            "8s"
+          ],
+          "default": "8s",
+          "markdownDescription": "How long one go-press may take, retries included, before Pawl gives up and shows `! timeout`. `4s` may time out at levels 3–5."
+        },
+        "pawl.log.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Append one line per go-press to `~/.pawl/sessions/YYYY-MM-DD.jsonl`."
+        },
+        "pawl.log.prompts": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Add the full prompt, which includes your code, to each session log line."
         }
       }
     }
