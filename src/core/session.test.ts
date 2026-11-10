@@ -1538,17 +1538,27 @@ describe("level 5", () => {
   });
 
   it.each([
-    ["longer than 40 lines", Array.from({ length: 41 }, (_, k) => `print(${k})\n`).join("")],
-    ["code that doesn't parse", "print(sum(nums)\nprint(1)\n"],
-  ])("shows ! step too big for %s, and logs it as an error", async (_, reply) => {
+    [
+      "longer than 40 lines",
+      Array.from({ length: 41 }, (_, k) => `print(${k})\n`).join(""),
+      "step_too_big",
+      "! step too big, split it in the plan",
+    ],
+    [
+      "longer than 40 lines that doesn't parse either",
+      "print(sum(nums)\n" + Array.from({ length: 41 }, (_, k) => `print(${k})\n`).join(""),
+      "step_too_big",
+      "! step too big, split it in the plan",
+    ],
+    ["code that doesn't parse", "print(sum(nums)\nprint(1)\n", "step_does_not_parse", "! step doesn't parse, press go again"],
+  ])("rejects a step %s, and logs it as an error", async (_, reply, reason, text) => {
     const { session, of } = await suggest(5, plan(), reply);
     await session.dispatch({ type: "accepted" });
 
     expect(of("ghost")).toEqual([]);
-    expect(of("marker").at(-1)).toEqual(expect.objectContaining({ text: "! step too big, split it in the plan", ttlMs: 3000 }));
-    expect(of("log").map((l) => l.entry)).toEqual([
-      expect.objectContaining({ outcome: "error", reason: "step_too_big", plan_step: 2 }),
-    ]);
+    expect(of("marker").at(-1)).toEqual(expect.objectContaining({ text, ttlMs: 3000 }));
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ outcome: "error", reason, plan_step: 2 })]);
+    expect(editsOf(of("edit"))).toEqual([]);
   });
 
   it("stops the stream once a step is past 40 lines", async () => {

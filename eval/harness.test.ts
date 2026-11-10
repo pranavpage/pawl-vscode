@@ -81,6 +81,15 @@ describe("runEval outcomes", () => {
     expect(press).toEqual(expect.objectContaining({ outcome: "step_too_big", ranAt: 5 }));
   });
 
+  it("records a level-5 step that doesn't parse as an error with its own reason", async () => {
+    const { model, run } = setup();
+    model.reply({ text: "print(sum(nums)\nprint(1)\n" });
+
+    const [press] = await run([py(5, "# PLAN\n# [ ] print the sum\n# END PLAN\n\n|\n")], 1);
+
+    expect(press).toEqual(expect.objectContaining({ outcome: "error", reason: "step_does_not_parse", ranAt: 5 }));
+  });
+
   it("records the level a press fell back to", async () => {
     const { model, run } = setup();
     model.reply({ text: "return 1" });
