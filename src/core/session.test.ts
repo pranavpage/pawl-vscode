@@ -84,16 +84,80 @@ describe("the request", () => {
     expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
   });
 
-  it("falls back to excluding reasoning when the model rejects the request", async () => {
+  const badRequest = () => ({ error: new ModelError("bad_request", "Provider returned error", 400) });
+
+  it("falls back to minimal reasoning when the model rejects effort none", async () => {
     const { session, model, of } = setup();
-    model
-      .reply({ error: new ModelError("bad_request", "Provider returned error", 400) })
-      .reply({ text: "x)\n" });
+    model.reply(badRequest()).reply({ text: "x)\n" });
 
     await session.dispatch({ type: "go", doc: doc("print(|") });
 
-    expect(model.requests.map((r) => r.body.reasoning)).toEqual([{ effort: "none" }, { exclude: true }]);
+    expect(model.requests.map((r) => r.body.reasoning)).toEqual([{ effort: "none" }, { effort: "minimal" }]);
     expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
+  });
+
+  it("falls back to low reasoning when the model rejects none and minimal", async () => {
+    const { session, model, of } = setup();
+    model.reply(badRequest()).reply(badRequest()).reply({ text: "x)\n" });
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    expect(model.requests.map((r) => r.body.reasoning)).toEqual([
+      { effort: "none" },
+      { effort: "minimal" },
+      { effort: "low" },
+    ]);
+    expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
+  });
+
+  it("starts the next press with the same model from the setting that worked", async () => {
+    const { session, model } = setup();
+    model.reply(badRequest()).reply(badRequest()).reply({ text: "x)\n" }).reply({ text: "y)\n" });
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+    await session.dispatch({ type: "rejected" });
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    expect(model.requests.map((r) => r.body.reasoning)).toEqual([
+      { effort: "none" },
+      { effort: "minimal" },
+      { effort: "low" },
+      { effort: "low" },
+    ]);
+  });
+
+  it("fails the press as a bad request when every setting is rejected", async () => {
+    const { session, model, of } = setup();
+    model.reply(badRequest()).reply(badRequest()).reply(badRequest());
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    expect(model.requests).toHaveLength(3);
+    expect(of("marker").at(-1)).toEqual(expect.objectContaining({ text: "! bad request" }));
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({ outcome: "error", reason: "bad_request" }),
+    ]);
+  });
+
+  it("never sends exclude", async () => {
+    const { session, model } = setup();
+    model.reply(badRequest()).reply(badRequest()).reply(badRequest());
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    for (const r of model.requests) expect(r.body.reasoning).not.toHaveProperty("exclude");
+  });
+
+  it.each([
+    ["rate limit", new ModelError("rate_limit", "Too many requests", 429)],
+    ["auth", new ModelError("bad_key", "Unauthorized", 401)],
+  ])("does not fall back on a %s error", async (_, error) => {
+    const { session, model } = setup();
+    model.reply({ error }).reply({ text: "x)\n" });
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    expect(model.requests.map((r) => r.body.reasoning)).toEqual([{ effort: "none" }]);
   });
 });
 
@@ -558,7 +622,7 @@ describe("the timeout", () => {
     expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ reason: "timeout", latency_ms: 4000 })]);
   });
 
-  it("is one deadline per go-press, covering the retry without reasoning", async () => {
+  it("is one deadline per go-press, covering the reasoning fallback", async () => {
     const { session, model, clock, of } = setup();
     model
       .reply({ text: "", afterMs: 5000 }, { error: new ModelError("bad_request", "Provider returned error", 400) })
