@@ -1,8 +1,11 @@
-import { findPin, type Pin } from "./markers";
-import { cutAtStopPoint, cutAtStreamEnd } from "./output";
-import { assembleContext, buildMessages } from "./prompt";
+import { assembleContext, offsetAt } from "./context";
+import { findMarkers, findPin, type Pin } from "./markers";
+import { createCutter, type Cutter } from "./output";
+import { buildMessages, CONTINUE_NUDGE } from "./prompt";
+import { stopRule } from "./stops";
+import { loadGrammar } from "./syntax";
 import { isoWithOffset } from "./time";
-import { ModelError, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type Position, type SessionEvent } from "./types";
+import { ModelError, type ChatMessage, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type Position, type SessionEvent } from "./types";
 
 export interface SessionConfig {
   /** The deadline for each go-press, covering every attempt. */
@@ -28,6 +31,9 @@ export interface Session {
 
 /** How long an error or `nothing to add` stays at the cursor, and an error in the status bar. */
 const NOTICE_TTL_MS = 3000;
+
+/** Room for what each level writes: a line, a statement, a block. */
+const maxTokens = (level: Level) => (level === 1 ? 128 : level === 2 ? 256 : 1024);
 
 interface Reply {
   suggestion: string;
@@ -150,36 +156,39 @@ export function createSession(deps: SessionDeps): Session {
   /** Models known to reject `effort: "none"`; they get `exclude` straight away. */
   const excludeReasoning = new Set<string>();
 
-  async function streamReply(request: ChatRequest, signal: AbortSignal): Promise<Reply> {
+  /** Streams a reply and aborts it as soon as the stop point arrives. */
+  async function streamReply(request: ChatRequest, cutter: Cutter, signal: AbortSignal): Promise<Reply> {
     const abort = new AbortController();
     let raw = "";
     let provider: string | undefined;
     for await (const chunk of deps.model.stream(request, AbortSignal.any([signal, abort.signal]))) {
       provider ??= chunk.provider;
       raw += chunk.text ?? "";
-      const suggestion = cutAtStopPoint(raw);
+      const suggestion = cutter.cut(raw);
       if (suggestion !== undefined) {
         abort.abort();
         return { suggestion, provider };
       }
     }
-    return { suggestion: cutAtStreamEnd(raw), provider };
+    return { suggestion: cutter.end(raw), provider };
   }
 
+  /** `newCutter` gives each stream its own, since a cutter remembers what it has read. */
   async function requestReply(
     model: string,
     base: Omit<ChatRequest, "model" | "reasoning">,
+    newCutter: () => Cutter,
     signal: AbortSignal,
   ): Promise<Reply> {
     if (!excludeReasoning.has(model)) {
       try {
-        return await streamReply({ ...base, model, reasoning: { effort: "none" } }, signal);
+        return await streamReply({ ...base, model, reasoning: { effort: "none" } }, newCutter(), signal);
       } catch (err) {
         // OpenRouter's wording for an unsupported effort varies, so any 400 gets one try with `exclude`.
         if (!(err instanceof ModelError && err.kind === "bad_request")) throw err;
       }
     }
-    const reply = await streamReply({ ...base, model, reasoning: { exclude: true } }, signal);
+    const reply = await streamReply({ ...base, model, reasoning: { exclude: true } }, newCutter(), signal);
     excludeReasoning.add(model);
     return reply;
   }
@@ -241,9 +250,11 @@ export function createSession(deps: SessionDeps): Session {
     if (!hasKey) return fail("no_key", draft);
 
     mark(doc.cursorCount > 1 ? "… · primary cursor only" : "…");
-    const context = assembleContext(doc);
-    const messages = buildMessages(doc, context, notThis);
+    const markers = findMarkers(doc);
+    const context = assembleContext(doc, level, markers.lines);
+    const messages = buildMessages(doc, level, context, markers.rules, notThis);
     draft.context_chars = context.before.length + context.after.length;
+    if (context.truncated) draft.context_truncated = true;
     draft.prompt = messages;
     draft.attempts = 1;
     const press: InFlight = {
@@ -261,11 +272,23 @@ export function createSession(deps: SessionDeps): Session {
     let reply: Reply | undefined;
     let error: unknown;
     try {
-      reply = await requestReply(
-        model,
-        { messages, provider: { sort: "latency" }, max_tokens: 128 },
-        press.abort.signal,
-      );
+      const at = offsetAt(doc.text, doc.cursor);
+      const insertion = { head: doc.text.slice(0, at), tail: doc.text.slice(at), languageId: doc.languageId };
+      const grammar = level >= 2 ? await loadGrammar(doc.languageId) : undefined;
+      const newCutter = () => createCutter(stopRule(level, insertion, grammar));
+      const ask = (messages: ChatMessage[]) =>
+        requestReply(
+          model,
+          { messages, provider: { sort: "latency" }, max_tokens: maxTokens(level) },
+          newCutter,
+          press.abort.signal,
+        );
+      reply = await ask(messages);
+      // Levels 3–5 get one more try at an empty reply, within the same deadline.
+      if (level >= 3 && reply.suggestion.trim() === "" && inFlight === press) {
+        draft.attempts = 2;
+        reply = await ask([...messages, CONTINUE_NUDGE]);
+      }
     } catch (err) {
       error = err;
     }
@@ -323,6 +346,8 @@ export function createSession(deps: SessionDeps): Session {
           return showStatus();
         case "activeDocChanged":
           activePin = event.doc && findPin(event.doc);
+          // Loads the file's grammar ahead of the first go-press that needs it.
+          if (event.doc) void loadGrammar(event.doc.languageId);
           return showStatus();
         case "go":
           return go(event.doc);

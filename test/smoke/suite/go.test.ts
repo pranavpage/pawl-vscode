@@ -152,6 +152,24 @@ describe("Pawl smoke", () => {
     assert.equal((await logEntry()).outcome, "accepted");
   });
 
+  it("level 3 writes only the block, cut by the bundled Python grammar", async () => {
+    // Indentation alone would end the block at the column-0 comment; the parser keeps it in.
+    openRouter.replies.push(["name)\n# note\n", "    return name\n", "\n\ngreet('x')\n"]);
+    await vscode.commands.executeCommand("pawl.pickLevel", 3);
+    try {
+      await vscode.commands.executeCommand("pawl.go");
+      assert.equal(await waitFor(() => devtools.ghostText(), "ghost text"), "name)");
+      await devtools.pressKey("Escape");
+
+      const entry = await logEntry();
+      assert.equal(entry.level, 3);
+      assert.equal(entry.outcome, "rejected");
+      assert.equal(entry.suggestion, "name)\n# note\n    return name");
+    } finally {
+      await vscode.commands.executeCommand("pawl.pickLevel", 1);
+    }
+  });
+
   it("accept-next-word takes one word and logs partial once the rest is rejected", async () => {
     openRouter.replies.push(["name, end='')\n"]);
 

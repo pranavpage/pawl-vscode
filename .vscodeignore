@@ -9,3 +9,13 @@ vitest.config.mts
 docs/
 .context/
 .env
+# Only the WASM grammars and web-tree-sitter's runtime are needed, not sources or native builds.
+node_modules/tree-sitter-*/src/**
+node_modules/tree-sitter-*/prebuilds/**
+node_modules/tree-sitter-*/bindings/**
+node_modules/tree-sitter-*/queries/**
+node_modules/tree-sitter-*/binding.gyp
+node_modules/tree-sitter-*/grammar.js
+node_modules/web-tree-sitter/debug/**
+node_modules/node-addon-api/**
+node_modules/node-gyp-build/**

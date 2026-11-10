@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSession, type Session, type SessionConfig } from "./session";
 import { doc, FakeClock, FakeModelClient } from "./testing/fakes";
-import { ModelError, type Effect, type Level, type Position } from "./types";
+import { ModelError, type DocumentSnapshot, type Effect, type Level, type Position } from "./types";
 
 function setup({
   hasKey = true,
@@ -167,7 +167,7 @@ describe("the session log", () => {
         level: 1,
         model: "deepseek/deepseek-v4.1-flash",
         provider: "DeepInfra",
-        context_chars: 21,
+        context_chars: 20,
         suggestion: "x)",
         latency_ms: 610,
         attempts: 1,
@@ -654,20 +654,337 @@ describe("a level change", () => {
   });
 });
 
-describe("levels 2–5", () => {
-  it("send each press to the level's model and, until their own stop rules land, finish only the line", async () => {
-    const { session, model, of } = setup();
-    model.reply({ text: "x)\nreturn x\n" });
-    await session.dispatch({ type: "setLevel", level: 4 });
+const goDoc = (source: string) =>
+  doc(source, { languageId: "go", path: "main.go", docId: "file:///work/main.go" });
+const jsDoc = (source: string) =>
+  doc(source, { languageId: "javascript", path: "main.js", docId: "file:///work/main.js" });
 
-    await session.dispatch({ type: "go", doc: doc("print(|") });
+/** Presses go at `level` while the model streams `chunks`. */
+async function suggest(level: Level, document: DocumentSnapshot, ...chunks: string[]) {
+  const t = setup({ level });
+  t.model.reply(...chunks.map((text) => ({ text })));
+  await t.session.dispatch({ type: "go", doc: document });
+  return { ...t, ghost: t.of("ghost").map((g) => g.text) };
+}
+
+describe("level 2", () => {
+  it.each([
+    [
+      "Python, a call spanning lines",
+      doc("def f(a, b):\n    result = compute(|\n"),
+      ["a,\n", "                     b)\n", "    return result\n"],
+      "a,\n                     b)",
+    ],
+    [
+      "Python, a statement on a new line",
+      doc("def f(xs):\n    |\n"),
+      ["total = sum(xs)\n    return total\n"],
+      "total = sum(xs)",
+    ],
+    ["Python, the header of an if", doc("def f(x):\n    if x > 0|\n"), [":\n        return x\n"], ":"],
+    ["Python, the rest of the line in the file", doc("print(|)\n"), ["x\n", "print(y)\n"], "x"],
+    [
+      "Go, a call spanning lines",
+      goDoc("package main\n\nfunc f() {\n\tx := compute(|\n}\n"),
+      ["a,\n\t\tb)\n", "\treturn x\n"],
+      "a,\n\t\tb)",
+    ],
+    [
+      "Go, the header of an if",
+      goDoc("package main\n\nfunc f(err error) error {\n\tif err != nil|\n}\n"),
+      [" {\n\t\treturn err\n\t}\n"],
+      " {",
+    ],
+    [
+      "an untuned language, by brackets",
+      jsDoc("function f() {\n  const x = compute(|\n}\n"),
+      ["a,\n    b);\n  return x;\n"],
+      "a,\n    b);",
+    ],
+    [
+      "Go, after a comment",
+      goDoc("package main\n\nfunc f() {\n\t|\n}\n"),
+      ["// note\n\tx := 1\n", "\ty := 2\n"],
+      "// note\n\tx := 1",
+    ],
+    ["an untuned language, at a semicolon", jsDoc("function f() {\n  |\n}\n"), ["let a = 1; let b = 2;\n"], "let a = 1;"],
+  ])("finishes only the current statement: %s", async (_, document, chunks, expected) => {
+    const { ghost, model } = await suggest(2, document, ...chunks);
+
+    expect(ghost).toEqual([expected]);
+    expect(model.requests[0].aborted).toBe(true);
+  });
+});
+
+describe("level 3", () => {
+  it.each([
+    [
+      "Python, the function body",
+      doc("def total(xs):\n    |\n"),
+      ["t = 0\n    for x in xs:\n", "        t += x\n    return t\n", "\n\nprint(total([1]))\n"],
+      "t = 0\n    for x in xs:\n        t += x\n    return t",
+    ],
+    [
+      "Python, the if body the cursor is in",
+      doc("def f(x):\n    if x:\n        |\n    return x\n"),
+      ["x += 1\n        print(x)\n", "    else:\n        pass\n"],
+      "x += 1\n        print(x)",
+    ],
+    [
+      "Python, a function whose header the user has started",
+      doc("def add(a, b|\n"),
+      ["):\n    return a + b\n", "\n\ndef sub(a, b):\n    return a - b\n"],
+      "):\n    return a + b",
+    ],
+    [
+      "Go, a function whose header the user has started",
+      goDoc("package main\n\nfunc add(a, b int|\n"),
+      [") int {\n\treturn a + b\n}\n", "\nfunc sub() {}\n"],
+      ") int {\n\treturn a + b\n}",
+    ],
+    [
+      "Go, a block the file already closes",
+      goDoc("package main\n\nfunc sum(xs []int) int {\n\t|\n}\n"),
+      ["t := 0\n\tfor _, x := range xs {\n\t\tt += x\n\t}\n", "\treturn t\n}\n", "\nfunc other() {}\n"],
+      "t := 0\n\tfor _, x := range xs {\n\t\tt += x\n\t}\n\treturn t",
+    ],
+    [
+      "Go, a block the file does not close yet",
+      goDoc("package main\n\nfunc sum(xs []int) int {\n\t|"),
+      ["t := 0\n\treturn t\n}\n", "\nfunc other() {}\n"],
+      "t := 0\n\treturn t\n}",
+    ],
+    [
+      "Go, the if body the cursor is in",
+      goDoc("package main\n\nfunc f(err error) error {\n\tif err != nil {\n\t\t|\n\t}\n\treturn nil\n}\n"),
+      ["log(err)\n\t\treturn err\n\t}\n", "\treturn nil\n}\n"],
+      "log(err)\n\t\treturn err",
+    ],
+    [
+      "an untuned language, by braces",
+      jsDoc("function f(xs) {\n  |\n}\n"),
+      ["let t = 0;\n  for (const x of xs) {\n    t += x;\n  }\n", "  return t;\n}\n", "\nfunction g() {}\n"],
+      "let t = 0;\n  for (const x of xs) {\n    t += x;\n  }\n  return t;",
+    ],
+  ])("writes only the block the cursor is in: %s", async (_, document, chunks, expected) => {
+    const { ghost, model } = await suggest(3, document, ...chunks);
+
+    expect(ghost).toEqual([expected]);
+    expect(model.requests[0].aborted).toBe(true);
+  });
+
+  it("falls back to brackets when the reply would break the file, as by repeating its `}`", async () => {
+    const { ghost } = await suggest(3, goDoc("package main\n\nfunc f() {\n\tx := []int{\n\t\t|\n\t}\n}\n"), "1, 2,\n\t}\n\treturn\n");
+
+    expect(ghost).toEqual(["1, 2,"]);
+  });
+
+  it("keeps the whole reply when it stays inside the block", async () => {
+    const { ghost, model } = await suggest(3, doc("def f(x):\n    |\n"), "y = x * 2\n", "    return y\n");
+
+    expect(ghost).toEqual(["y = x * 2\n    return y"]);
+    expect(model.requests[0].aborted).toBe(false);
+  });
+
+  it("sends more room for a block than for a line", async () => {
+    const { model } = await suggest(3, doc("def f(x):\n    |\n"), "return x\n");
+
+    expect(model.requests[0].body.max_tokens).toBeGreaterThan(128);
+  });
+});
+
+describe("an empty reply at level 3", () => {
+  it("is retried once with a nudge to continue, and logged with attempts: 2", async () => {
+    const { session, model, of } = setup({ level: 3 });
+    model.reply({ text: "\n\nprint(1)\n" }).reply({ text: "return x\n" });
+
+    await session.dispatch({ type: "go", doc: doc("def f(x):\n    |\n") });
+    await session.dispatch({ type: "accepted" });
+
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests[1].body.messages.slice(0, -1)).toEqual(model.requests[0].body.messages);
+    expect(model.requests[1].body.messages.at(-1)?.content).toContain("Continue the implementation");
+    expect(of("ghost").map((g) => g.text)).toEqual(["return x"]);
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({ outcome: "accepted", attempts: 2, suggestion: "return x" }),
+    ]);
+  });
+
+  it("shows · nothing to add when the retry is empty too", async () => {
+    const { session, model, of } = setup({ level: 3 });
+    model.reply({ text: "" }).reply({ text: "" });
+
+    await session.dispatch({ type: "go", doc: doc("def f(x):\n    |\n") });
+
+    expect(of("marker").at(-1)).toEqual(expect.objectContaining({ text: "· nothing to add" }));
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ outcome: "empty", attempts: 2 })]);
+  });
+
+  it("is retried within the same deadline", async () => {
+    const { session, model, clock, of } = setup({ level: 3 });
+    model.reply({ text: "", afterMs: 5000 }).reply({ stall: true });
+
+    const pressed = session.dispatch({ type: "go", doc: doc("def f(x):\n    |\n") });
+    await vi.waitFor(() => expect(model.requests).toHaveLength(2));
+    clock.advance(3000);
+    await pressed;
+
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({ outcome: "error", reason: "timeout", latency_ms: 8000, attempts: 2 }),
+    ]);
+  });
+
+  it("is not retried at level 2", async () => {
+    const { session, model, of } = setup({ level: 2 });
+    model.reply({ text: "" });
+
+    await session.dispatch({ type: "go", doc: doc("def f(x):\n    |\n") });
+
+    expect(model.requests).toHaveLength(1);
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ outcome: "empty", attempts: 1 })]);
+  });
+});
+
+describe("levels 4 and 5", () => {
+  it("send each press to the level's model and, until their own rules land, write a block like level 3", async () => {
+    const { session, model, of } = setup({ level: 4 });
+    model.reply({ text: "return x\n\nprint(1)\n" });
+
+    await session.dispatch({ type: "go", doc: doc("def f(x):\n    |\n") });
     await session.dispatch({ type: "accepted" });
 
     expect(model.requests[0].body.model).toBe("model-for-level-4");
-    expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
+    expect(of("ghost").map((g) => g.text)).toEqual(["return x"]);
     expect(of("log").map((l) => l.entry)).toEqual([
       expect.objectContaining({ level: 4, model: "model-for-level-4", outcome: "accepted" }),
     ]);
+  });
+});
+
+/** The file as the model saw it in the last request. */
+const sentFile = (model: FakeModelClient) => model.requests.at(-1)!.body.messages.at(-1)!.content;
+const sentSystem = (model: FakeModelClient) => model.requests.at(-1)!.body.messages[0].content;
+const numbered = (from: number, to: number, indent = "") =>
+  Array.from({ length: to - from + 1 }, (_, k) => `${indent}x${from + k} = ${from + k}`).join("\n");
+
+describe("the context", () => {
+  const file = [
+    "import os",
+    "",
+    "def first():",
+    numbered(1, 30, "    "),
+    "",
+    "def second():",
+    numbered(31, 60, "    "),
+    "    |",
+    numbered(61, 65, "    "),
+    "",
+    "def third():",
+    "    pass",
+    "",
+  ].join("\n");
+
+  it("at level 1 is the current line, the 20 lines above it and the rest of its block", async () => {
+    const { model } = await suggest(1, doc(file), "x\n");
+
+    const sent = sentFile(model);
+    expect(sent).toContain("    x41 = 41\n");
+    expect(sent).not.toContain("x40 = 40");
+    expect(sent).toContain("x65 = 65");
+    expect(sent).not.toContain("def third");
+  });
+
+  it("at level 2 is the function the cursor is in", async () => {
+    const { model } = await suggest(2, doc(file), "x\n");
+
+    const sent = sentFile(model);
+    expect(sent).toContain("def second():\n    x31 = 31");
+    expect(sent).toContain("x65 = 65");
+    expect(sent).not.toContain("def first");
+    expect(sent).not.toContain("def third");
+  });
+
+  it("at level 3 is the whole file", async () => {
+    const { model, of, session } = await suggest(3, doc(file), "x\n");
+    await session.dispatch({ type: "accepted" });
+
+    const sent = sentFile(model);
+    expect(sent).toContain("import os\n\ndef first():");
+    expect(sent).toContain("def third():\n    pass");
+    expect(of("log")[0].entry).not.toHaveProperty("context_truncated");
+  });
+
+  describe("past the cap at levels 3–5", () => {
+    const big = (cursorAt: number) =>
+      [
+        "# @pawl level=3",
+        "import os",
+        "# RULE: no external deps",
+        "# PLAN",
+        "# [ ] read the file",
+        "# END PLAN",
+        "",
+        "def big():",
+        numbered(1, cursorAt - 1, "    "),
+        "    |",
+        numbered(cursorAt, 6000, "    "),
+        "",
+      ].join("\n");
+
+    it("keeps a window centred on the cursor, with the marker and import lines, and logs context_truncated", async () => {
+      const { model, session, of } = await suggest(3, doc(big(3000)), "x\n");
+      await session.dispatch({ type: "accepted" });
+
+      const sent = sentFile(model);
+      expect(sent.length).toBeLessThan(50_000);
+      expect(sent).toContain("x2999 = 2999\n    <CURSOR>\n    x3000 = 3000");
+      expect(sent).not.toContain("x1000 = 1000\n");
+      expect(sent).not.toContain("x5000 = 5000\n");
+      for (const line of ["# @pawl level=3", "import os", "# RULE: no external deps", "# PLAN", "# [ ] read the file", "# END PLAN"]) {
+        expect(sent).toContain(line);
+      }
+      const above = sent.slice(0, sent.indexOf("<CURSOR>")).split("\n").length;
+      const below = sent.slice(sent.indexOf("<CURSOR>")).split("\n").length;
+      expect(Math.abs(above - below)).toBeLessThan(20);
+      expect(of("log")[0].entry).toEqual(expect.objectContaining({ context_truncated: true }));
+    });
+
+    it("applies at levels 4 and 5 too", async () => {
+      for (const level of [4, 5] as const) {
+        const { model } = await suggest(level, doc(big(3000)), "x\n");
+        expect(sentFile(model).length).toBeLessThan(50_000);
+      }
+    });
+  });
+});
+
+describe("RULE:", () => {
+  it("is sent with every request, wherever it is in the file", async () => {
+    for (const level of [1, 2, 3, 4, 5] as const) {
+      const lines = ["# RULE: no external deps", numbered(1, 100), "def f():", "    |", ""].join("\n");
+      const { model } = await suggest(level, doc(lines), "x\n");
+
+      if (level === 1) expect(sentFile(model)).not.toContain("RULE");
+      expect(sentSystem(model)).toContain("no external deps");
+    }
+  });
+
+  it("works in Go comments", async () => {
+    const { model } = await suggest(1, goDoc("package main\n\n// RULE: wrap errors with %w\nfunc f() {\n\t|\n}\n"), "x\n");
+
+    expect(sentSystem(model)).toContain("wrap errors with %w");
+  });
+
+  it.each([
+    ["in a string", 'x = "RULE: not a rule"'],
+    ["in a docstring", '"""\n# RULE: not a rule\n"""'],
+    ["in lower case", "# rule: not a rule"],
+    ["after other text", "# see RULE: not a rule"],
+    ["as part of a word", "# XRULE: not a rule"],
+  ])("counts only in a comment with the exact prefix, so not %s", async (_, line) => {
+    const { model } = await suggest(1, doc(`${line}\nprint(|`), "x)\n");
+
+    expect(sentSystem(model)).not.toContain("not a rule");
   });
 });
 

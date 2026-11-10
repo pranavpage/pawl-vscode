@@ -1,7 +1,9 @@
 // Post-processing of model output: strip markdown fences, cut at the stop point.
+import type { StopRule } from "./stops";
 
 const LEADING_FENCE = /^\s*```[^\n]*\n/;
-const TRAILING_FENCE = /\n?```\s*$/;
+/** A closing fence ends the reply, whatever comes after it. */
+const FENCE = "```";
 
 /**
  * Removes a leading fence line. Returns undefined while the text could still
@@ -11,24 +13,31 @@ function stripLeadingFence(raw: string): string | undefined {
   const fence = LEADING_FENCE.exec(raw);
   if (fence) return raw.slice(fence[0].length);
   const trimmed = raw.trimStart();
-  if (trimmed.length > 0 && "```".startsWith(trimmed.slice(0, 3)) && !trimmed.includes("\n")) {
+  if (trimmed.length > 0 && FENCE.startsWith(trimmed.slice(0, 3)) && !trimmed.includes("\n")) {
     return undefined;
   }
   return raw;
 }
 
-/**
- * Level 1 stop rule: the suggestion ends at the end of the current line.
- * Returns the cut suggestion once the stop point has streamed in, else undefined.
- */
-export function cutAtStopPoint(raw: string): string | undefined {
-  const body = stripLeadingFence(raw);
-  if (body === undefined) return undefined;
-  const eol = body.indexOf("\n");
-  return eol < 0 ? undefined : body.slice(0, eol).replace(TRAILING_FENCE, "");
+export interface Cutter {
+  /** The suggestion once its stop point has streamed in, else undefined. */
+  cut(raw: string): string | undefined;
+  /** The suggestion once the stream has ended without reaching a stop point. */
+  end(raw: string): string;
 }
 
-/** Final cut once the stream has ended without reaching a stop point. */
-export function cutAtStreamEnd(raw: string): string {
-  return cutAtStopPoint(raw) ?? (stripLeadingFence(raw) ?? "").replace(TRAILING_FENCE, "");
+export function createCutter(stop: StopRule): Cutter {
+  return {
+    cut(raw) {
+      const body = stripLeadingFence(raw);
+      if (body === undefined) return undefined;
+      const fence = body.indexOf(FENCE);
+      return fence < 0 ? stop(body, false) : stop(body.slice(0, fence), true);
+    },
+    end(raw) {
+      const body = stripLeadingFence(raw) ?? "";
+      const fence = body.indexOf(FENCE);
+      return stop(fence < 0 ? body : body.slice(0, fence), true) ?? "";
+    },
+  };
 }
