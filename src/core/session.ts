@@ -9,7 +9,7 @@ import { relatedFiles } from "./related";
 import { MAX_STEP_LINES, parsesWith, planStepRule, stopRule, type Insertion, type StopRule } from "./stops";
 import { loadGrammar } from "./syntax";
 import { isoWithOffset } from "./time";
-import { ModelError, type ChatMessage, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type Position, type SessionEvent } from "./types";
+import { ModelError, type ChatMessage, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type Position, type ReasoningEffort, type SessionEvent } from "./types";
 
 export interface SessionConfig {
   /** The deadline for each go-press, covering every attempt. */
@@ -37,6 +37,9 @@ export interface Session {
 
 /** How long an error or `nothing to add` stays at the cursor, and an error in the status bar. */
 const NOTICE_TTL_MS = 3000;
+
+/** Reasoning settings to try, in order, for a model that rejects the one before with a 400. */
+const REASONING_EFFORTS: readonly ReasoningEffort[] = ["none", "minimal", "low"];
 
 /** Room for what each level writes: a line, a statement, a block, a plan step. */
 const maxTokens = (level: Level) => [0, 128, 256, 1024, 1024, 2048][level];
@@ -161,8 +164,8 @@ export function createSession(deps: SessionDeps): Session {
     stopStatusTimer = deps.clock.after(NOTICE_TTL_MS, showStatus);
   }
 
-  /** Models known to reject `effort: "none"`; they get `exclude` straight away. */
-  const excludeReasoning = new Set<string>();
+  /** The first effort that worked for each model that rejected `"none"`; later presses start there. */
+  const reasoningEffort = new Map<string, ReasoningEffort>();
 
   /** Streams a reply and aborts it as soon as the stop point arrives. `onText` sees the reply so far. */
   async function streamReply(
@@ -195,17 +198,18 @@ export function createSession(deps: SessionDeps): Session {
     signal: AbortSignal,
     onText?: (raw: string) => void,
   ): Promise<Reply> {
-    if (!excludeReasoning.has(model)) {
+    const efforts = REASONING_EFFORTS.slice(REASONING_EFFORTS.indexOf(reasoningEffort.get(model) ?? "none"));
+    for (const [i, effort] of efforts.entries()) {
       try {
-        return await streamReply({ ...base, model, reasoning: { effort: "none" } }, newCutter(), signal, onText);
+        const reply = await streamReply({ ...base, model, reasoning: { effort } }, newCutter(), signal, onText);
+        if (effort !== "none") reasoningEffort.set(model, effort);
+        return reply;
       } catch (err) {
-        // OpenRouter's wording for an unsupported effort varies, so any 400 gets one try with `exclude`.
-        if (!(err instanceof ModelError && err.kind === "bad_request")) throw err;
+        // OpenRouter's wording for an unsupported effort varies, so any 400 steps down to the next one.
+        if (!(err instanceof ModelError && err.kind === "bad_request") || i === efforts.length - 1) throw err;
       }
     }
-    const reply = await streamReply({ ...base, model, reasoning: { exclude: true } }, newCutter(), signal, onText);
-    excludeReasoning.add(model);
-    return reply;
+    throw new Error("unreachable");
   }
 
   function cancelInFlight(): void {

@@ -2,6 +2,12 @@
 
 export type Level = 0 | 1 | 2 | 3 | 4 | 5;
 
+/**
+ * How much a model may reason. Pawl asks for `"none"` and steps down this list only for models
+ * that reject it; `exclude` is never used, since it hides reasoning without turning it off.
+ */
+export type ReasoningEffort = "none" | "minimal" | "low";
+
 /** The dial, as shown in the level list. */
 export const LEVELS: readonly { level: Level; name: string; writes: string }[] = [
   { level: 0, name: "Off", writes: "Nothing" },
@@ -139,7 +145,7 @@ export interface ChatMessage {
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
-  reasoning: { effort: "none" } | { exclude: true };
+  reasoning: { effort: ReasoningEffort };
   provider: { sort: "latency" };
   max_tokens: number;
 }
