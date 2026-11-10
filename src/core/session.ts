@@ -264,8 +264,10 @@ export function createSession(deps: SessionDeps): Session {
   }
 
   async function go(doc: DocumentSnapshot): Promise<void> {
+    // A press while Pawl is still asking does nothing, and logs nothing, so a held go key sends one
+    // request. Typing, moving or switching editors already cancel a request, so this one is for here.
+    if (inFlight) return;
     const pressedAt = deps.clock.now();
-    cancelInFlight();
     asked = undefined;
     const notThis = endShown("rejected");
     const mark = (text: string, ttlMs?: number) =>
@@ -377,7 +379,7 @@ export function createSession(deps: SessionDeps): Session {
     } catch (err) {
       error = err;
     }
-    // Replaced or cancelled while waiting; its log line is already written.
+    // Cancelled while waiting; its log line is already written.
     if (inFlight !== press) return;
     inFlight = undefined;
     press.stopTimer();

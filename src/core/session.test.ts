@@ -276,8 +276,9 @@ describe("the session log", () => {
     await session.dispatch({ type: "go", doc: doc("print(|") });
     await session.dispatch({ type: "accepted" });
     const cancelled = session.dispatch({ type: "go", doc: doc("print(|") });
-    await session.dispatch({ type: "go", doc: doc("print(|") });
+    await session.dispatch({ type: "editorChanged" });
     await cancelled;
+    await session.dispatch({ type: "go", doc: doc("print(|") });
     await session.dispatch({ type: "rejected" });
 
     const entries = of("log").map((l) => l.entry);
@@ -409,20 +410,51 @@ describe("an empty reply", () => {
 });
 
 describe("go while a request is in flight", () => {
-  it("cancels it, logs it as cancelled and sends a new one", async () => {
+  it("is ignored: no new request, no log line, and the one in flight goes on", async () => {
     const { session, model, of } = setup();
-    model.reply({ stall: true }).reply({ text: "y)\n" });
+    model.reply({ text: "x" }, { text: ")\n" }).reply({ text: "y)\n" });
 
     const first = session.dispatch({ type: "go", doc: doc("print(|") });
     await session.dispatch({ type: "go", doc: doc("print(|") });
+    expect(of("log")).toEqual([]);
     await first;
 
-    expect(model.requests).toHaveLength(2);
-    expect(model.requests[0].aborted).toBe(true);
-    expect(of("ghost").map((g) => g.text)).toEqual(["y)"]);
-    expect(of("log").map((l) => l.entry)).toEqual([
-      expect.objectContaining({ outcome: "cancelled", attempts: 1, context_chars: 6 }),
-    ]);
+    expect(model.requests).toHaveLength(1);
+    expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
+    expect(of("log")).toEqual([]);
+  });
+
+  it("sends one request for a held key, however many presses arrive before the reply", async () => {
+    const { session, model, of } = setup();
+    model.reply({ text: "x", afterMs: 500 }, { text: ")\n" }).reply({ text: "y)\n" });
+
+    const first = session.dispatch({ type: "go", doc: doc("print(|") });
+    await Promise.all(Array.from({ length: 30 }, () => session.dispatch({ type: "go", doc: doc("print(|") })));
+    await first;
+
+    expect(model.requests).toHaveLength(1);
+    expect(of("ghost").map((g) => g.text)).toEqual(["x)"]);
+    await session.dispatch({ type: "rejected" });
+    expect(of("log").map((l) => l.entry.outcome)).toEqual(["rejected"]);
+  });
+
+  it("works as before once the reply has arrived: the suggestion is rejected and Pawl asks for another", async () => {
+    const { session, model, of } = setup();
+    model.reply({ stall: true }).reply({ text: "x)\n" }).reply({ text: "y)\n" });
+
+    const first = session.dispatch({ type: "go", doc: doc("print(|") });
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+    expect(model.requests).toHaveLength(1);
+    await session.dispatch({ type: "editorChanged" });
+    await first;
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    expect(model.requests).toHaveLength(3);
+    expect(JSON.stringify(model.requests[2].body.messages)).toContain("x)");
+    expect(of("ghost").map((g) => g.text)).toEqual(["x)", "y)"]);
+    expect(of("log").map((l) => l.entry.outcome)).toEqual(["cancelled", "rejected"]);
   });
 });
 
