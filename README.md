@@ -43,8 +43,12 @@ npm run eval -- --presses 4 --out results.json      # a quick run; every press s
 
 For each level, the report gives:
 
-- **Overruns past the stop point.** A suggestion overruns if, inserted at the cursor, it goes past the level's stop point (at level 5: more than 40 lines, or a file that parses worse). Expected: zero. If there is an overrun, the script exits with code 1.
-- **Latency.** The p50 and p90 time from go-press to suggestion, `Q:` or `nothing to add`. Failed requests are left out.
+- **Overruns past the stop point.** Expected: zero. If there is an overrun, the script exits with code 1. The script checks each suggestion, inserted at the cursor, against the stop point. It does not use Pawl's cutter for this check, so it can find errors in the cutter. A suggestion overruns if it has:
+  - at level 1, a second line;
+  - at level 2, a second statement;
+  - at levels 3–4, a new top-level declaration, or in Python a line to the left of the cursor's block;
+  - at level 5, more than 40 lines, or code that makes the file parse worse.
+- **Latency.** The p50 and p90 time from go-press to suggestion, `Q:`, `nothing to add` or `step_too_big`. Failed requests are left out, and the report gives their number.
 - **Providers.** The serving provider of each press, as reported by OpenRouter.
 - **Outcomes.** How many presses showed a suggestion, ended `empty` (nothing to add) or `question` (`Q:`), failed with `step_too_big`, or failed with another error.
 - **Cut and fallback counts.** How often the model wrote past the stop point and Pawl cut it there, and how often a press fell back to a lower level.

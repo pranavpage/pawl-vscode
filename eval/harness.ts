@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { offsetAt } from "../src/core/context";
 import { replyBody } from "../src/core/output";
 import { createSession } from "../src/core/session";
-import { MAX_STEP_LINES, parsesWith, stopRule, type Insertion } from "../src/core/stops";
-import { loadGrammar } from "../src/core/syntax";
+import { MAX_STEP_LINES, parsesWith, type Insertion } from "../src/core/stops";
+import { loadGrammar, type Node } from "../src/core/syntax";
 import type { ChatRequest, Clock, DocumentSnapshot, Level, LogEntry, ModelClient, StreamChunk } from "../src/core/types";
 
 /** A file with a cursor, pressed at one level. */
@@ -15,8 +15,8 @@ export interface Fixture {
   doc: DocumentSnapshot;
 }
 
-/** How a press ended: a suggestion on screen, `nothing to add`, a `Q:`, or an error. */
-export type PressOutcome = "shown" | "empty" | "question" | "error";
+/** How a press ended: a suggestion on screen, `nothing to add`, a `Q:`, a level-5 step too big, or another error. */
+export type PressOutcome = "shown" | "empty" | "question" | "step_too_big" | "error";
 
 export interface PressResult {
   fixture: string;
@@ -29,7 +29,7 @@ export interface PressResult {
   latencyMs?: number;
   attempts: number;
   outcome: PressOutcome;
-  /** For errors, e.g. `timeout` or `step_too_big`. */
+  /** For errors, e.g. `timeout` or `rate_limit`. */
   reason?: string;
   suggestion?: string;
   /** The last reply as the model sent it, up to where Pawl stopped reading. */
@@ -142,7 +142,13 @@ export async function runEval(options: EvalOptions): Promise<PressResult[]> {
 
 async function resultOf(fixture: Fixture, entry: LogEntry, raw: string): Promise<PressResult> {
   const outcome: PressOutcome =
-    entry.outcome === "rejected" ? "shown" : entry.outcome === "empty" || entry.outcome === "question" ? entry.outcome : "error";
+    entry.outcome === "rejected"
+      ? "shown"
+      : entry.outcome === "empty" || entry.outcome === "question"
+        ? entry.outcome
+        : entry.reason === "step_too_big"
+          ? "step_too_big"
+          : "error";
   const suggestion = entry.suggestion;
   const shown = outcome === "shown" && suggestion !== undefined;
   return {
@@ -163,15 +169,49 @@ async function resultOf(fixture: Fixture, entry: LogEntry, raw: string): Promise
 }
 
 /**
- * True if `suggestion`, inserted at the cursor, goes past the level's stop point: cutting it
- * again would make it shorter. At level 5: more than the line cap, or a file that parses worse.
+ * True if `suggestion`, inserted at the cursor, goes past the level's stop point. This checks the
+ * stop points as the spec states them, apart from Pawl's own cutter, so it can catch the cutter's
+ * mistakes. Level 1: a second line. Level 2: a second statement. Levels 3–4: a new top-level
+ * declaration, or in Python a line left of the cursor's block. Level 5: more than the line cap,
+ * or a file that parses worse. Languages without a grammar are checked at levels 1 and 5 only.
  */
 export async function overruns(doc: DocumentSnapshot, level: Level, suggestion: string): Promise<boolean> {
+  const lines = suggestion.split("\n");
+  if (level === 1) return lines.length > 1;
   const at = offsetAt(doc.text, doc.cursor);
   const insertion: Insertion = { head: doc.text.slice(0, at), tail: doc.text.slice(at), languageId: doc.languageId };
-  const grammar = level >= 2 ? await loadGrammar(doc.languageId) : undefined;
-  if (level === 5) return suggestion.split("\n").length > MAX_STEP_LINES || !parsesWith(insertion, suggestion, grammar);
-  return stopRule(level, insertion, grammar)(suggestion, true) !== suggestion;
+  const grammar = await loadGrammar(doc.languageId);
+  if (level === 5) return lines.length > MAX_STEP_LINES || !parsesWith(insertion, suggestion, grammar);
+  const firstCode = suggestion.search(/\S/);
+  if (!grammar || firstCode < 0) return false;
+
+  if (level >= 3 && !grammar.braces) {
+    const cursorLine = insertion.head.slice(insertion.head.lastIndexOf("\n") + 1);
+    const blockIndent = cursorLine.trim() ? indentOf(cursorLine) : cursorLine.length;
+    if (lines.slice(1).some((line) => line.trim() !== "" && indentOf(line) < blockIndent)) return true;
+  }
+  const tree = grammar.parser.parse(insertion.head + suggestion + insertion.tail);
+  if (!tree) return false;
+  try {
+    // A statement (level 2) or top-level declaration (levels 3–4) that starts after the
+    // suggestion's first code is one too many.
+    const containers = level === 2 ? grammar.containers : new Set([tree.rootNode.type]);
+    const from = at + firstCode;
+    return startsIn(tree.rootNode, containers, from, at + suggestion.length);
+  } finally {
+    tree.delete();
+  }
+}
+
+const indentOf = (line: string) => line.length - line.trimStart().length;
+
+/** True if a non-comment child of a `containers` node starts in (from, to). */
+function startsIn(node: Node, containers: ReadonlySet<string>, from: number, to: number): boolean {
+  return node.children.some((child) => {
+    if (child.endIndex <= from || child.startIndex >= to) return false;
+    if (containers.has(node.type) && child.type !== "comment" && child.startIndex > from) return true;
+    return startsIn(child, containers, from, to);
+  });
 }
 
 export interface LevelSummary {
@@ -194,7 +234,7 @@ export interface LevelSummary {
 /** Nearest-rank percentile of sorted values. */
 const percentile = (sorted: number[], p: number) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
 
-const count = (counts: Record<string, number>, key: string) => (counts[key] = (counts[key] ?? 0) + 1);
+const increment = (counts: Record<string, number>, key: string) => (counts[key] = (counts[key] ?? 0) + 1);
 
 /** One summary per level, levels in order. */
 export function summarize(results: PressResult[]): LevelSummary[] {
@@ -204,14 +244,13 @@ export function summarize(results: PressResult[]): LevelSummary[] {
     const outcomes: LevelSummary["outcomes"] = { shown: 0, empty: 0, question: 0, step_too_big: 0, errors: {} };
     const providers: Record<string, number> = {};
     for (const press of presses) {
-      if (press.provider) count(providers, press.provider);
-      if (press.outcome !== "error") outcomes[press.outcome]++;
-      else if (press.reason === "step_too_big") outcomes.step_too_big++;
-      else count(outcomes.errors, press.reason ?? "unknown");
+      if (press.provider) increment(providers, press.provider);
+      if (press.outcome === "error") increment(outcomes.errors, press.reason ?? "unknown");
+      else outcomes[press.outcome]++;
     }
     // A step too big is still a reply, so it counts toward latency.
     const latencies = presses
-      .filter((p) => (p.outcome !== "error" || p.reason === "step_too_big") && p.latencyMs !== undefined)
+      .filter((p) => p.outcome !== "error" && p.latencyMs !== undefined)
       .map((p) => p.latencyMs!)
       .sort((a, b) => a - b);
     return {

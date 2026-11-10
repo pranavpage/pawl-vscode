@@ -78,7 +78,7 @@ describe("runEval outcomes", () => {
 
     const [press] = await run([py(5, "# PLAN\n# [ ] print a lot\n# END PLAN\n\n|\n")], 1);
 
-    expect(press).toEqual(expect.objectContaining({ outcome: "error", reason: "step_too_big", ranAt: 5 }));
+    expect(press).toEqual(expect.objectContaining({ outcome: "step_too_big", ranAt: 5 }));
   });
 
   it("records the level a press fell back to", async () => {
@@ -100,6 +100,19 @@ describe("overruns", () => {
     expect(await overruns(at, 2, "x + 1")).toBe(false);
     expect(await overruns(at, 3, "x + 1\n    z = 2")).toBe(false);
     expect(await overruns(at, 3, "x + 1\n\ndef g():\n    pass")).toBe(true);
+ 
+  });
+
+  it("checks the stop point on its own terms, not with Pawl's cutter", async () => {
+    const inIf = doc("def f(x):\n    if x:\n        |\n    return y\n");
+    const goBody = doc("package main\n\nfunc f() int {\n\t|\n}\n", { languageId: "go" });
+
+    expect(await overruns(inIf, 3, "y = 1")).toBe(false);
+    expect(await overruns(inIf, 3, "y = 1\n    z = 2")).toBe(true);
+    expect(await overruns(goBody, 4, "x := 1\n\treturn x")).toBe(false);
+    expect(await overruns(goBody, 4, "return 1\n}\n\nfunc g() {")).toBe(true);
+    expect(await overruns(goBody, 2, "x := 1")).toBe(false);
+    expect(await overruns(goBody, 2, "x := 1; y := 2")).toBe(true);
   });
 });
 
@@ -145,7 +158,7 @@ describe("summarize", () => {
 
   it("counts step_too_big apart from other errors, with its latency, and counts fallbacks", () => {
     const [summary] = summarize([
-      press({ level: 5, ranAt: 5, latencyMs: 2000, outcome: "error", reason: "step_too_big", model: "moonshotai/kimi-k3.1-pro" }),
+      press({ level: 5, ranAt: 5, latencyMs: 2000, outcome: "step_too_big", model: "moonshotai/kimi-k3.1-pro" }),
       press({ level: 5, ranAt: 4, latencyMs: 1000, model: "z-ai/glm-5.3" }),
     ]);
 

@@ -21,6 +21,12 @@ const USAGE = `Usage: OPENROUTER_API_KEY=... npm run eval -- [options]
   --timeout 4s|8s     the deadline for each press, as the pawl.timeout setting (default 8s)
   --out FILE          also write every press, suggestions included, as JSON`;
 
+/** Hides the key in text that is printed or written, in case a reply or error echoes it. */
+function redact(text: string): string {
+  const key = process.env.OPENROUTER_API_KEY;
+  return key ? text.split(key).join("[OPENROUTER_API_KEY]") : text;
+}
+
 /** Pawl's default model for each level, from the extension's settings. */
 function defaultModels(): Record<number, string> {
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
@@ -63,7 +69,7 @@ function parse() {
 }
 
 const ms = (n?: number) => (n === undefined ? "-" : `${n} ms`);
-const counts = (c: Record<string, number>) =>
+const formatCounts = (c: Record<string, number>) =>
   Object.entries(c)
     .sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `${k} ${n}`)
@@ -77,12 +83,13 @@ function pressLine(p: PressResult): string {
 
 function summaryLines(s: LevelSummary): string[] {
   const { shown, empty, question, step_too_big, errors } = s.outcomes;
+  const failed = Object.values(errors).reduce((n, k) => n + k, 0);
   return [
     `Level ${s.level} · ${s.models.join(", ")} · ${s.presses} presses`,
     `  overruns past the stop point: ${s.overruns}`,
-    `  latency: p50 ${ms(s.p50)} · p90 ${ms(s.p90)}`,
-    `  providers: ${counts(s.providers)}`,
-    `  outcomes: shown ${shown} · empty ${empty} · question ${question} · step_too_big ${step_too_big} · errors: ${counts(errors)}`,
+    `  latency: p50 ${ms(s.p50)} · p90 ${ms(s.p90)}${failed ? ` (${failed} failed presses left out)` : ""}`,
+    `  providers: ${formatCounts(s.providers)}`,
+    `  outcomes: shown ${shown} · empty ${empty} · question ${question} · step_too_big ${step_too_big} · errors: ${formatCounts(errors)}`,
     `  cut by Pawl at the stop point: ${s.cut} · fell back to a lower level: ${s.fellBack}`,
   ];
 }
@@ -91,8 +98,6 @@ async function main(): Promise<void> {
   const options = parse();
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) fail("Set OPENROUTER_API_KEY in the environment.");
-  /** Everything printed or written goes through here, so the key can't leak even if a reply echoes it. */
-  const redact = (text: string) => text.split(key).join("[OPENROUTER_API_KEY]");
   const print = (text: string) => console.log(redact(text));
 
   const fixtures = (await loadFixtures(join(ROOT, "eval", "fixtures"))).filter((f) => options.levels.includes(f.level));
@@ -125,8 +130,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  const key = process.env.OPENROUTER_API_KEY;
-  const message = String(err?.stack ?? err);
-  console.error(key ? message.split(key).join("[OPENROUTER_API_KEY]") : message);
+  console.error(redact(String(err?.stack ?? err)));
   process.exit(1);
 });
