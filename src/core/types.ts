@@ -101,6 +101,12 @@ export interface LogEntry {
   attempts: number;
   outcome: Outcome;
   reason?: string;
+  /** For `error`: the HTTP status, or the `error.code` of an error inside the stream. */
+  status?: number;
+  /** For `error`: what OpenRouter said, cut to 300 characters. */
+  error_message?: string;
+  /** For `error`: the provider OpenRouter names in `error.metadata.provider_name`. */
+  error_provider?: string;
   /** For `partial`: how much of the suggestion ended up in the file. */
   accepted_chars?: number;
   /** Level 5 only: the number of the plan step the press wrote. */
@@ -163,6 +169,8 @@ export class ModelError extends Error {
     readonly kind: ModelErrorKind,
     message: string,
     readonly status?: number,
+    /** The provider OpenRouter blames for the error, if it names one. */
+    readonly provider?: string,
   ) {
     super(message);
     this.name = "ModelError";
