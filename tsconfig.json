@@ -11,6 +11,6 @@
     "sourceMap": true,
     "types": ["node", "mocha"]
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "eval"],
   "exclude": ["node_modules", "out"]
 }

@@ -1,7 +1,8 @@
 // Thin VS Code adapter: turns editor actions into session events and applies the session's effects.
 import * as vscode from "vscode";
 import { createSession, type SessionConfig } from "./core/session";
-import { LEVELS, type Clock, type DocumentSnapshot, type Effect, type Level, type Position, type WorkspaceFiles } from "./core/types";
+import { systemClock } from "./core/time";
+import { LEVELS, type DocumentSnapshot, type Effect, type Level, type Position, type WorkspaceFiles } from "./core/types";
 import { OpenRouterClient } from "./openrouter";
 import { appendLogEntry } from "./sessionLog";
 
@@ -9,14 +10,6 @@ const KEY_SECRET = "pawl.openrouterKey";
 const LEVEL_STATE = "pawl.level";
 /** Context key the Esc and accept-next-word keybindings check, so they only wrap Pawl's suggestions. */
 const VISIBLE_KEY = "pawl.suggestionVisible";
-
-const clock: Clock = {
-  now: () => Date.now(),
-  after(ms, fn) {
-    const timer = setTimeout(fn, ms);
-    return () => clearTimeout(timer);
-  },
-};
 
 function readConfig(): SessionConfig {
   const config = vscode.workspace.getConfiguration("pawl");
@@ -128,7 +121,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.extensionMode === vscode.ExtensionMode.Test ? process.env.PAWL_OPENROUTER_BASE_URL : undefined;
   const session = createSession({
     model: new OpenRouterClient(() => Promise.resolve(secrets.get(KEY_SECRET)), baseUrl),
-    clock,
+    clock: systemClock,
     modelForLevel: (level) => vscode.workspace.getConfiguration("pawl").get<string>(`models.level${level}`) ?? "",
     config: readConfig,
     level: LEVELS.find((l) => l.level === globalState.get(LEVEL_STATE))?.level,
