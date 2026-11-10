@@ -1,4 +1,6 @@
-// What the model sees at each level: the text before and after the cursor.
+// What the model sees at each level: the text before and after the cursor, and at levels
+// 4–5 the files it imports.
+import type { RelatedFile } from "./related";
 import type { DocumentSnapshot, Level, Position } from "./types";
 
 export interface Context {
@@ -6,9 +8,15 @@ export interface Context {
   after: string;
   /** False when only part of the file is sent. */
   wholeFile: boolean;
-  /** True when the cap left out lines the level would send. */
+  /** Other files, sent whole. */
+  related: RelatedFile[];
+  /** True when the cap left out lines or files the level would send. */
   truncated: boolean;
 }
+
+/** The characters a context sends. */
+export const contextChars = (context: Context) =>
+  context.related.reduce((n, file) => n + file.path.length + file.text.length, context.before.length + context.after.length);
 
 /** How many lines above the cursor level 1 sees. */
 const LINES_ABOVE_AT_LEVEL_1 = 20;
@@ -21,7 +29,7 @@ const indentOf = (line: string) => line.length - line.trimStart().length;
 const isBlank = (line: string) => line.trim() === "";
 /** A line that only closes what the lines above it opened, like `}` or `})`. */
 const CLOSING_LINE = /^\s*[)\]}]/;
-const FUNCTION_HEADER =
+export const FUNCTION_HEADER =
   /^\s*(?:(?:export|default|async|pub(?:\([\w ]+\))?|public|private|protected|internal|static|override|final|abstract|inline|unsafe|suspend)\s+)*(?:def|func|function|fn|fun|sub)\b|=>\s*\{?\s*$/;
 const IMPORT: Record<string, RegExp> = {
   python: /^(?:import|from)\s/,
@@ -141,8 +149,22 @@ export function assembleContext(doc: DocumentSnapshot, level: Level, keep: numbe
   return {
     ...render(lines, cursor, [first - 1, ...included, last + 1]),
     wholeFile: first === 0 && last === lines.length - 1 && included.length === lines.length,
+    related: [],
     truncated: included.length < last - first + 1,
   };
+}
+
+/** Adds `files` whole, nearest first, while they fit under the cap. Files that don't fit are left out. */
+export function withRelated(context: Context, files: RelatedFile[]): Context {
+  let budget = CONTEXT_CAP_CHARS - contextChars(context);
+  const related: RelatedFile[] = [];
+  for (const file of files) {
+    const size = file.path.length + file.text.length;
+    if (size > budget) continue;
+    budget -= size;
+    related.push(file);
+  }
+  return { ...context, related, truncated: context.truncated || related.length < files.length };
 }
 
 /**

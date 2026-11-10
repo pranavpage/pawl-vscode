@@ -1,8 +1,12 @@
-import { assembleContext, offsetAt } from "./context";
+import { acceptEdits, type OnAccept } from "./accept";
+import { aimAt } from "./aim";
+import { assembleContext, contextChars, offsetAt, withRelated } from "./context";
+import { importInsertion, newImports, splitImports } from "./imports";
 import { findMarkers, findPin, type Pin } from "./markers";
-import { createCutter, type Cutter } from "./output";
+import { createCutter, replyBody, type Cut, type Cutter } from "./output";
 import { buildMessages, CONTINUE_NUDGE } from "./prompt";
-import { stopRule } from "./stops";
+import { relatedFiles } from "./related";
+import { MAX_STEP_LINES, parsesWith, planStepRule, stopRule, type Insertion } from "./stops";
 import { loadGrammar } from "./syntax";
 import { isoWithOffset } from "./time";
 import { ModelError, type ChatMessage, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type Position, type SessionEvent } from "./types";
@@ -11,6 +15,8 @@ export interface SessionConfig {
   /** The deadline for each go-press, covering every attempt. */
   timeoutMs: number;
   log: { enabled: boolean; prompts: boolean };
+  /** Keeps a filled `TODO:` comment on accept. */
+  keepTodoOnAccept: boolean;
 }
 
 export interface SessionDeps {
@@ -32,13 +38,10 @@ export interface Session {
 /** How long an error or `nothing to add` stays at the cursor, and an error in the status bar. */
 const NOTICE_TTL_MS = 3000;
 
-/** Room for what each level writes: a line, a statement, a block. */
-const maxTokens = (level: Level) => (level === 1 ? 128 : level === 2 ? 256 : 1024);
+/** Room for what each level writes: a line, a statement, a block, a plan step. */
+const maxTokens = (level: Level) => [0, 128, 256, 1024, 1024, 2048][level];
 
-interface Reply {
-  suggestion: string;
-  provider?: string;
-}
+type Reply = Cut & { provider?: string };
 
 /** A log line still waiting for its outcome. */
 type Draft = Omit<LogEntry, "outcome">;
@@ -53,6 +56,9 @@ interface Shown {
   /** True once a word was accepted, which makes any non-accept a `partial`. */
   wordAccepted: boolean;
   draft: Draft;
+  /** The file as it was at the go-press, which the edits on accept start from. */
+  before: string;
+  onAccept?: OnAccept;
 }
 
 const samePosition = (a: Position, b: Position) => a.line === b.line && a.character === b.character;
@@ -93,6 +99,8 @@ export function createSession(deps: SessionDeps): Session {
   let lastLatency: number | undefined;
   let inFlight: InFlight | undefined;
   let shown: Shown | undefined;
+  /** A `Q:` at the cursor; it stays until the user types or moves. */
+  let asked: { docId: string; at: Position } | undefined;
 
   /** The level a valid pin holds the file at; none while the dial is at 0, which overrides every pin. */
   function pinnedLevel(pin: Pin): Level | undefined {
@@ -156,21 +164,27 @@ export function createSession(deps: SessionDeps): Session {
   /** Models known to reject `effort: "none"`; they get `exclude` straight away. */
   const excludeReasoning = new Set<string>();
 
-  /** Streams a reply and aborts it as soon as the stop point arrives. */
-  async function streamReply(request: ChatRequest, cutter: Cutter, signal: AbortSignal): Promise<Reply> {
+  /** Streams a reply and aborts it as soon as the stop point arrives. `onText` sees the reply so far. */
+  async function streamReply(
+    request: ChatRequest,
+    cutter: Cutter,
+    signal: AbortSignal,
+    onText?: (raw: string) => void,
+  ): Promise<Reply> {
     const abort = new AbortController();
     let raw = "";
     let provider: string | undefined;
     for await (const chunk of deps.model.stream(request, AbortSignal.any([signal, abort.signal]))) {
       provider ??= chunk.provider;
       raw += chunk.text ?? "";
-      const suggestion = cutter.cut(raw);
-      if (suggestion !== undefined) {
+      onText?.(raw);
+      const cut = cutter.cut(raw);
+      if (cut !== undefined) {
         abort.abort();
-        return { suggestion, provider };
+        return { ...cut, provider };
       }
     }
-    return { suggestion: cutter.end(raw), provider };
+    return { ...cutter.end(raw), provider };
   }
 
   /** `newCutter` gives each stream its own, since a cutter remembers what it has read. */
@@ -179,16 +193,17 @@ export function createSession(deps: SessionDeps): Session {
     base: Omit<ChatRequest, "model" | "reasoning">,
     newCutter: () => Cutter,
     signal: AbortSignal,
+    onText?: (raw: string) => void,
   ): Promise<Reply> {
     if (!excludeReasoning.has(model)) {
       try {
-        return await streamReply({ ...base, model, reasoning: { effort: "none" } }, newCutter(), signal);
+        return await streamReply({ ...base, model, reasoning: { effort: "none" } }, newCutter(), signal, onText);
       } catch (err) {
         // OpenRouter's wording for an unsupported effort varies, so any 400 gets one try with `exclude`.
         if (!(err instanceof ModelError && err.kind === "bad_request")) throw err;
       }
     }
-    const reply = await streamReply({ ...base, model, reasoning: { exclude: true } }, newCutter(), signal);
+    const reply = await streamReply({ ...base, model, reasoning: { exclude: true } }, newCutter(), signal, onText);
     excludeReasoning.add(model);
     return reply;
   }
@@ -212,6 +227,10 @@ export function createSession(deps: SessionDeps): Session {
     if (!ended) return undefined;
     shown = undefined;
     emit({ type: "clearGhost" });
+    if (outcome === "accepted" && ended.onAccept) {
+      const accepted = acceptEdits(ended.before, ended.at, ended.text, ended.onAccept);
+      if (accepted) emit({ type: "edit", docId: ended.docId, ...accepted });
+    }
     const entry: LogEntry =
       outcome !== "accepted" && ended.wordAccepted
         ? { ...ended.draft, outcome: "partial", accepted_chars: ended.typed.length }
@@ -220,16 +239,24 @@ export function createSession(deps: SessionDeps): Session {
     return ended.text.slice(ended.typed.length);
   }
 
+  /** Takes the `Q:` away from the cursor. */
+  function clearQuestion(): void {
+    if (!asked) return;
+    asked = undefined;
+    emit({ type: "clearMarker" });
+  }
+
   async function go(doc: DocumentSnapshot): Promise<void> {
     const pressedAt = deps.clock.now();
     cancelInFlight();
+    asked = undefined;
     const notThis = endShown("rejected");
     const mark = (text: string, ttlMs?: number) =>
       emit({ type: "marker", docId: doc.docId, at: doc.cursor, text, ttlMs });
-    const level = effectiveLevel(findPin(doc));
-    const pressed = { ts: isoWithOffset(pressedAt), file: doc.path, lang: doc.languageId, level };
+    const dial = effectiveLevel(findPin(doc));
+    const pressed = { ts: isoWithOffset(pressedAt), file: doc.path, lang: doc.languageId, level: dial };
 
-    if (level === 0) {
+    if (dial === 0) {
       mark("Pawl off", NOTICE_TTL_MS);
       log({ ...pressed, context_chars: 0, attempts: 0, outcome: "off" });
       return;
@@ -238,54 +265,97 @@ export function createSession(deps: SessionDeps): Session {
     if (doc.cursorCount > 1 || doc.hasSelection) {
       emit({ type: "collapseSelection", docId: doc.docId, at: doc.cursor });
     }
-    const model = deps.modelForLevel(level);
-    const draft: Draft = { ...pressed, model, context_chars: 0, attempts: 0 };
-    const fail = (reason: string, entry: Draft) => {
-      const shownReason = `! ${reason.replaceAll("_", " ")}`;
+    const fail = (reason: string, entry: Draft, shownReason = `! ${reason.replaceAll("_", " ")}`) => {
       mark(shownReason, NOTICE_TTL_MS);
       flashStatus(`Pawl ${shownReason}`);
       log({ ...entry, outcome: "error", reason });
     };
 
-    if (!hasKey) return fail("no_key", draft);
+    if (!hasKey) return fail("no_key", { ...pressed, model: deps.modelForLevel(dial), context_chars: 0, attempts: 0 });
 
-    mark(doc.cursorCount > 1 ? "… · primary cursor only" : "…");
+    const config = deps.config();
     const markers = findMarkers(doc);
-    const context = assembleContext(doc, level, markers.lines);
-    const messages = buildMessages(doc, level, context, markers.rules, notThis);
-    draft.context_chars = context.before.length + context.after.length;
-    if (context.truncated) draft.context_truncated = true;
-    draft.prompt = messages;
-    draft.attempts = 1;
+    const aim = aimAt(doc, dial, markers, { keepTodo: config.keepTodoOnAccept });
+    if (!("level" in aim)) {
+      mark("· move to an empty line", NOTICE_TTL_MS);
+      const model = deps.modelForLevel(dial);
+      log({ ...pressed, model, context_chars: 0, attempts: 0, plan_step: aim.step.number, outcome: "error", reason: "not_empty_line" });
+      return;
+    }
+    const { level } = aim;
+    const model = deps.modelForLevel(level);
+    const draft: Draft = { ...pressed, level, model, context_chars: 0, attempts: 1 };
+    if (aim.step) draft.plan_step = aim.step.number;
+    /** The in-flight marker: what the press fills, and anything the user should know about it. */
+    const inFlightMarker = (more = "") =>
+      [
+        aim.source ? `… ${aim.source}${more}` : "…",
+        aim.fallback,
+        doc.cursorCount > 1 ? "primary cursor only" : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    mark(inFlightMarker());
+
+    let context = assembleContext(doc, level, markers.lines);
+    draft.context_chars = contextChars(context);
     const press: InFlight = {
       docId: doc.docId,
       at: doc.cursor,
       draft,
       abort: new AbortController(),
       timedOut: false,
-      stopTimer: deps.clock.after(deps.config().timeoutMs, () => {
+      stopTimer: deps.clock.after(config.timeoutMs, () => {
         press.timedOut = true;
         press.abort.abort();
       }),
     };
     inFlight = press;
+    const at = offsetAt(doc.text, doc.cursor);
+    const insertion: Insertion = { head: doc.text.slice(0, at), tail: doc.text.slice(at), languageId: doc.languageId };
+    let grammar: Awaited<ReturnType<typeof loadGrammar>>;
     let reply: Reply | undefined;
     let error: unknown;
     try {
-      const at = offsetAt(doc.text, doc.cursor);
-      const insertion = { head: doc.text.slice(0, at), tail: doc.text.slice(at), languageId: doc.languageId };
-      const grammar = level >= 2 ? await loadGrammar(doc.languageId) : undefined;
-      const newCutter = () => createCutter(stopRule(level, insertion, grammar));
+      // Levels 4–5 also see the files this one imports.
+      if (level >= 4 && doc.files) {
+        context = withRelated(context, await relatedFiles(doc, doc.files));
+        if (inFlight !== press) return;
+        draft.context_chars = contextChars(context);
+      }
+      if (context.truncated) draft.context_truncated = true;
+      const messages = buildMessages(doc, level, context, markers.rules, { task: aim.task, notThis });
+      draft.prompt = messages;
+      grammar = level >= 2 ? await loadGrammar(doc.languageId) : undefined;
+      const newCutter = () =>
+        createCutter(level === 5 ? planStepRule(doc.languageId) : stopRule(level, insertion, grammar), {
+          questions: level >= 3,
+        });
+      // At level 5, the marker says so as soon as the step brings new imports.
+      let importsShown = 0;
+      const onText =
+        level === 5
+          ? (raw: string) => {
+              const body = replyBody(raw)?.body;
+              if (body === undefined) return;
+              const { imports } = splitImports(body, doc.languageId, false);
+              const count = newImports(imports, doc.text, doc.languageId).length;
+              if (count === importsShown || inFlight !== press) return;
+              importsShown = count;
+              mark(inFlightMarker(count > 0 ? ` +${count} import${count > 1 ? "s" : ""}` : ""));
+            }
+          : undefined;
       const ask = (messages: ChatMessage[]) =>
         requestReply(
           model,
           { messages, provider: { sort: "latency" }, max_tokens: maxTokens(level) },
           newCutter,
           press.abort.signal,
+          onText,
         );
       reply = await ask(messages);
       // Levels 3–5 get one more try at an empty reply, within the same deadline.
-      if (level >= 3 && reply.suggestion.trim() === "" && inFlight === press) {
+      if (level >= 3 && reply.question === undefined && reply.suggestion.trim() === "" && inFlight === press) {
         draft.attempts = 2;
         reply = await ask([...messages, CONTINUE_NUDGE]);
       }
@@ -302,21 +372,51 @@ export function createSession(deps: SessionDeps): Session {
 
     lastLatency = draft.latency_ms;
     draft.provider = reply.provider;
-    draft.suggestion = reply.suggestion;
     showStatus();
-    if (reply.suggestion.trim() === "") {
+    if (reply.question !== undefined) {
+      // A question shows at the cursor as a marker, which Tab can't insert.
+      draft.suggestion = `Q: ${reply.question.replace(/^Q:\s*/, "")}`;
+      mark(draft.suggestion);
+      asked = { docId: doc.docId, at: doc.cursor };
+      log({ ...draft, outcome: "question" });
+      return;
+    }
+    let suggestion = reply.suggestion;
+    let onAccept = aim.onAccept;
+    if (level === 5 && suggestion.trim() !== "") {
+      const { imports, code } = splitImports(suggestion, doc.languageId);
+      suggestion = tidyStep(code, insertion.head);
+      if (suggestion.split("\n").length > MAX_STEP_LINES || !parsesWith(insertion, suggestion, grammar)) {
+        draft.suggestion = suggestion;
+        return fail("step_too_big", draft, "! step too big, split it in the plan");
+      }
+      const added = newImports(imports, doc.text, doc.languageId);
+      if (added.length > 0) onAccept = { ...onAccept!, imports: importInsertion(doc.text, doc.languageId, added) };
+    }
+    draft.suggestion = suggestion;
+    if (suggestion.trim() === "") {
       mark("· nothing to add", NOTICE_TTL_MS);
       log({ ...draft, outcome: "empty" });
       return;
     }
     emit({ type: "clearMarker" });
-    emit({ type: "ghost", docId: doc.docId, at: doc.cursor, text: reply.suggestion });
-    shown = { docId: doc.docId, at: doc.cursor, text: reply.suggestion, typed: "", wordAccepted: false, draft };
+    emit({ type: "ghost", docId: doc.docId, at: doc.cursor, text: suggestion });
+    shown = {
+      docId: doc.docId,
+      at: doc.cursor,
+      text: suggestion,
+      typed: "",
+      wordAccepted: false,
+      draft,
+      before: doc.text,
+      onAccept,
+    };
   }
 
   /** Type-through: the suggestion stays while the file matches it, and is accepted once typed out. */
   function edited(docId: string, at: Position, removed: number, text: string): void {
     if (inFlight?.docId === docId) cancelInFlight();
+    if (asked?.docId === docId) clearQuestion();
     if (shown?.docId !== docId) return;
     const { typed } = shown;
     // The edit may retype or replace text already typed, as the editor does on Tab.
@@ -333,6 +433,7 @@ export function createSession(deps: SessionDeps): Session {
   /** A suggestion belongs to the spot it was asked for, so leaving that spot ends it. */
   function cursorMoved(docId: string, at: Position): void {
     if (inFlight && (inFlight.docId !== docId || !samePosition(inFlight.at, at))) cancelInFlight();
+    if (asked && (asked.docId !== docId || !samePosition(asked.at, at))) clearQuestion();
     if (shown && (shown.docId !== docId || offsetIn(shown.typed, shown.at, at) !== shown.typed.length)) {
       endShown("dismissed");
     }
@@ -366,6 +467,7 @@ export function createSession(deps: SessionDeps): Session {
           return cursorMoved(event.docId, event.at);
         case "editorChanged":
           cancelInFlight();
+          clearQuestion();
           endShown("dismissed");
           return;
         case "levelUp":
@@ -377,4 +479,14 @@ export function createSession(deps: SessionDeps): Session {
       }
     },
   };
+}
+
+/**
+ * A step goes in at the cursor, on its empty line: leading blank lines go, and so does an indent
+ * on its first line that repeats the one already before the cursor.
+ */
+function tidyStep(code: string, head: string): string {
+  const indent = head.slice(head.lastIndexOf("\n") + 1);
+  const step = code.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+  return indent && step.startsWith(indent) ? step.slice(indent.length) : step;
 }

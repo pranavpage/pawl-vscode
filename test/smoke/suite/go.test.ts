@@ -170,6 +170,33 @@ describe("Pawl smoke", () => {
     }
   });
 
+  it("level 5 writes the plan step at the cursor, and accepting it ticks the step", async () => {
+    openRouter.replies.push(["print('hello')\n"]);
+    const [file] = await vscode.workspace.findFiles("plan.py");
+    const plan = await vscode.window.showTextDocument(file);
+    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+    plan.selection = new vscode.Selection(3, 0, 3, 0);
+    await vscode.commands.executeCommand("pawl.pickLevel", 5);
+    try {
+      await vscode.commands.executeCommand("pawl.go");
+      assert.equal(await waitFor(() => devtools.ghostText(), "ghost text"), "print('hello')");
+      await devtools.pressKey("Tab");
+      await waitFor(() => plan.document.lineAt(1).text === "# [x] say hello", "the step to be ticked");
+
+      assert.equal(plan.document.lineAt(3).text, "print('hello')");
+      assert.deepEqual(plan.selection.active, new vscode.Position(4, 0), "the cursor is on a new line after the step");
+      const entry = await logEntry();
+      assert.equal(entry.level, 5);
+      assert.equal(entry.plan_step, 1);
+      assert.equal(entry.outcome, "accepted");
+    } finally {
+      await vscode.commands.executeCommand("pawl.pickLevel", 1);
+      await vscode.commands.executeCommand("workbench.action.files.revert");
+      await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+      editor = await vscode.window.showTextDocument(editor.document);
+    }
+  });
+
   it("accept-next-word takes one word and logs partial once the rest is rejected", async () => {
     openRouter.replies.push(["name, end='')\n"]);
 

@@ -1,7 +1,7 @@
 // Thin VS Code adapter: turns editor actions into session events and applies the session's effects.
 import * as vscode from "vscode";
 import { createSession, type SessionConfig } from "./core/session";
-import { LEVELS, type Clock, type DocumentSnapshot, type Effect, type Level, type Position } from "./core/types";
+import { LEVELS, type Clock, type DocumentSnapshot, type Effect, type Level, type Position, type WorkspaceFiles } from "./core/types";
 import { OpenRouterClient } from "./openrouter";
 import { appendLogEntry } from "./sessionLog";
 
@@ -23,6 +23,7 @@ function readConfig(): SessionConfig {
   return {
     timeoutMs: config.get("timeout") === "4s" ? 4000 : 8000,
     log: { enabled: config.get("log.enabled", true), prompts: config.get("log.prompts", false) },
+    keepTodoOnAccept: config.get("keepTodoOnAccept", false),
   };
 }
 
@@ -89,6 +90,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void setVisible(false);
         void vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
         return;
+      case "edit":
+        void applyEdits(effect);
+        return;
       case "collapseSelection": {
         const editor = editorFor(effect.docId);
         if (editor) editor.selections = [new vscode.Selection(toVs(effect.at), toVs(effect.at))];
@@ -101,6 +105,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         appendLogEntry(effect.entry).catch((err) => console.error("Pawl: could not write session log", err));
         return;
     }
+  }
+
+  /** The edits an accept brings. Skipped whole if the file no longer holds what they replace. */
+  async function applyEdits({ docId, edits, cursor }: Extract<Effect, { type: "edit" }>): Promise<void> {
+    const document = vscode.workspace.textDocuments.find((d) => docIdOf(d) === docId);
+    if (!document) return;
+    const ranges = edits.map((e) => new vscode.Range(toVs(e.start), toVs(e.end)));
+    if (edits.some((e, k) => document.getText(ranges[k]) !== e.replaces)) {
+      console.warn("Pawl: the file changed before the accept edits could apply; skipped them");
+      return;
+    }
+    const edit = new vscode.WorkspaceEdit();
+    edits.forEach((e, k) => edit.replace(document.uri, ranges[k], e.text));
+    if (!(await vscode.workspace.applyEdit(edit))) return;
+    const editor = editorFor(docId);
+    if (editor) editor.selection = new vscode.Selection(toVs(cursor), toVs(cursor));
   }
 
   // Smoke tests point the client at a local fake; nothing else may redirect the key.
@@ -272,6 +292,36 @@ async function checkCopilot(): Promise<void> {
   }
 }
 
+/**
+ * The files in a document's workspace folder. Open documents are read as the editor has them,
+ * unsaved changes included.
+ */
+function workspaceFiles(document: vscode.TextDocument): WorkspaceFiles | undefined {
+  const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+  if (!folder) return undefined;
+  const uriOf = (path: string) => vscode.Uri.joinPath(folder.uri, ...path.split("/").filter(Boolean));
+  return {
+    async read(path) {
+      const uri = uriOf(path);
+      const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+      if (open) return open.getText();
+      try {
+        return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+      } catch {
+        return undefined;
+      }
+    },
+    async list(dir) {
+      try {
+        const entries = await vscode.workspace.fs.readDirectory(uriOf(dir));
+        return entries.filter(([, type]) => type & vscode.FileType.File).map(([name]) => name);
+      } catch {
+        return [];
+      }
+    },
+  };
+}
+
 function snapshot(editor: vscode.TextEditor): DocumentSnapshot {
   const { document, selection, selections } = editor;
   return {
@@ -282,6 +332,7 @@ function snapshot(editor: vscode.TextEditor): DocumentSnapshot {
     cursor: { line: selection.active.line, character: selection.active.character },
     cursorCount: selections.length,
     hasSelection: !selection.isEmpty,
+    files: workspaceFiles(document),
   };
 }
 
