@@ -141,7 +141,8 @@
     "compile": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "vitest run",
-    "test:smoke": "npm run compile && node ./out/test/smoke/runTest.js"
+    "test:smoke": "npm run compile && node ./out/test/smoke/runTest.js",
+    "eval": "npm run compile && node ./out/eval/run.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

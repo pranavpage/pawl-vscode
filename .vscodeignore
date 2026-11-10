@@ -19,3 +19,5 @@ node_modules/tree-sitter-*/grammar.js
 node_modules/web-tree-sitter/debug/**
 node_modules/node-addon-api/**
 node_modules/node-gyp-build/**
+eval/
+out/eval/
