@@ -11,6 +11,16 @@ On-demand AI completion for VS Code with a 0–5 help dial. Pawl writes only whe
 | 4 | Skeleton | Fills the empty function or `TODO:` you're in |
 | 5 | Plan step | Writes the next unchecked step of a plan comment |
 
+## Install
+
+Pawl isn't on the Marketplace. To build it from `main` and install it:
+
+```sh
+git switch main && git pull && npm ci && npm run package && code --install-extension pawl.vsix --force
+```
+
+Then reload VS Code and run **Pawl: Set OpenRouter key**. `npm run package` alone writes `pawl.vsix` in the repo root.
+
 ## Development
 
 ```sh

@@ -8,6 +8,10 @@ tsconfig.json
 vitest.config.mts
 docs/
 .context/
+CLAUDE.md
+prototypes/
+*.vsix
+.gitignore
 .env
 # Only the WASM grammars and web-tree-sitter's runtime are needed, not sources or native builds.
 node_modules/tree-sitter-*/src/**
