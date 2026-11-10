@@ -50,7 +50,7 @@ For each level, the report gives:
   - at level 5, more than 40 lines, or code that makes the file parse worse.
 - **Latency.** The p50 and p90 time from go-press to suggestion, `Q:`, `nothing to add` or `step_too_big`. Failed requests are left out, and the report gives their number.
 - **Providers.** The serving provider of each press, as reported by OpenRouter.
-- **Outcomes.** How many presses showed a suggestion, ended `empty` (nothing to add) or `question` (`Q:`), failed with `step_too_big`, or failed with another error.
+- **Outcomes.** How many presses showed a suggestion, ended `empty` (nothing to add) or `question` (`Q:`), failed with `step_too_big` (a level-5 step of more than 40 lines), or failed with another error, such as `step_does_not_parse` (a level-5 step that does not parse).
 - **Cut and fallback counts.** How often the model wrote past the stop point and Pawl cut it there, and how often a press fell back to a lower level.
 
 ### Models

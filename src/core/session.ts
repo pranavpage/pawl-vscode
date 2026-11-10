@@ -386,9 +386,13 @@ export function createSession(deps: SessionDeps): Session {
     if (level === 5 && suggestion.trim() !== "") {
       const { imports, code } = splitImports(suggestion, doc.languageId);
       suggestion = tidyStep(code, insertion.head);
-      if (suggestion.split("\n").length > MAX_STEP_LINES || !parsesWith(insertion, suggestion, grammar)) {
+      if (suggestion.split("\n").length > MAX_STEP_LINES) {
         draft.suggestion = suggestion;
         return fail("step_too_big", draft, "! step too big, split it in the plan");
+      }
+      if (!parsesWith(insertion, suggestion, grammar)) {
+        draft.suggestion = suggestion;
+        return fail("step_does_not_parse", draft, "! step doesn't parse, press go again");
       }
       const added = newImports(imports, doc.text, doc.languageId);
       if (added.length > 0) onAccept = { ...onAccept!, imports: importInsertion(doc.text, doc.languageId, added) };
