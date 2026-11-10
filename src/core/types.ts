@@ -64,6 +64,8 @@ export interface LogEntry {
   model?: string;
   provider?: string;
   context_chars: number;
+  /** Only when the context cap left part of the file out. */
+  context_truncated?: boolean;
   /** Only when `pawl.log.prompts` is on. */
   prompt?: ChatMessage[];
   suggestion?: string;
