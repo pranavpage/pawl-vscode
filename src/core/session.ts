@@ -86,10 +86,23 @@ interface InFlight {
   stopTimer(): void;
 }
 
-/** The `reason` logged and shown for a failed request. */
+/** The `reason` logged and shown for a failed request. An error inside the stream may have no status. */
 function errorReason(err: unknown): string {
   if (!(err instanceof ModelError)) return "internal";
-  return err.kind === "http" ? `http_${err.status}` : err.kind;
+  return err.kind === "http" ? `http_${err.status ?? 500}` : err.kind;
+}
+
+/** How much of OpenRouter's error message a log line keeps. */
+const MAX_ERROR_MESSAGE = 300;
+
+/** What OpenRouter said about a failed request, for its log line. */
+function errorDetails(err: unknown): Pick<LogEntry, "status" | "error_message" | "error_provider"> {
+  if (!(err instanceof ModelError)) return {};
+  const details: Pick<LogEntry, "status" | "error_message" | "error_provider"> = {};
+  if (err.status !== undefined) details.status = err.status;
+  if (err.message) details.error_message = err.message.slice(0, MAX_ERROR_MESSAGE);
+  if (err.provider) details.error_provider = err.provider;
+  return details;
 }
 
 export function createSession(deps: SessionDeps): Session {
@@ -269,10 +282,10 @@ export function createSession(deps: SessionDeps): Session {
     if (doc.cursorCount > 1 || doc.hasSelection) {
       emit({ type: "collapseSelection", docId: doc.docId, at: doc.cursor });
     }
-    const fail = (reason: string, entry: Draft, shownReason = `! ${reason.replaceAll("_", " ")}`) => {
+    const fail = (reason: string, entry: Draft, shownReason = `! ${reason.replaceAll("_", " ")}`, err?: unknown) => {
       mark(shownReason, NOTICE_TTL_MS);
       flashStatus(`Pawl ${shownReason}`);
-      log({ ...entry, outcome: "error", reason });
+      log({ ...entry, outcome: "error", reason, ...errorDetails(err) });
     };
 
     if (!hasKey) return fail("no_key", { ...pressed, model: deps.modelForLevel(dial), context_chars: 0, attempts: 0 });
@@ -370,7 +383,7 @@ export function createSession(deps: SessionDeps): Session {
     press.stopTimer();
     draft.latency_ms = deps.clock.now() - pressedAt;
     if (press.timedOut) return fail("timeout", draft);
-    if (!reply) return fail(errorReason(error), draft);
+    if (!reply) return fail(errorReason(error), draft, undefined, error);
 
     lastLatency = draft.latency_ms;
     draft.provider = reply.provider;

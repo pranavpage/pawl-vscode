@@ -334,6 +334,51 @@ describe("errors", () => {
     expect(of("status").at(-1)?.text).toBe("Pawl 1");
   });
 
+  it.each([
+    ["from the HTTP status", []],
+    ["inside the stream", [{ text: "x" }]],
+  ])("logs what OpenRouter said about a 429 %s", async (_, before) => {
+    const { session, model, of } = setup();
+    const message = "deepseek/deepseek-v4.1-flash is temporarily rate-limited upstream";
+    model.reply(...before, { error: new ModelError("rate_limit", message, 429, "DeepInfra") });
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    expect(of("marker").at(-1)?.text).toBe("! rate limit");
+    expect(of("status").at(-1)?.text).toBe("Pawl ! rate limit");
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({
+        outcome: "error",
+        reason: "rate_limit",
+        status: 429,
+        error_message: message,
+        error_provider: "DeepInfra",
+      }),
+    ]);
+  });
+
+  it("cuts OpenRouter's message to 300 characters and leaves out what it didn't send", async () => {
+    const { session, model, of } = setup();
+    model.reply({ error: new ModelError("http", "x".repeat(1000), 402) });
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    const [entry] = of("log").map((l) => l.entry);
+    expect(entry).toEqual(expect.objectContaining({ reason: "http_402", status: 402, error_message: "x".repeat(300) }));
+    expect(entry).not.toHaveProperty("error_provider");
+  });
+
+  it("gives a network error its message but no status", async () => {
+    const { session, model, of } = setup();
+    model.reply({ error: new ModelError("network", "TypeError: fetch failed") });
+
+    await session.dispatch({ type: "go", doc: doc("print(|") });
+
+    const [entry] = of("log").map((l) => l.entry);
+    expect(entry).toEqual(expect.objectContaining({ reason: "network", error_message: "TypeError: fetch failed" }));
+    expect(entry).not.toHaveProperty("status");
+  });
+
   it("shows a model error at the cursor and logs it", async () => {
     const { session, model, of } = setup();
     model.reply({ error: new ModelError("rate_limit", "Too many requests", 429) });
@@ -609,6 +654,8 @@ describe("the timeout", () => {
     expect(of("log").map((l) => l.entry)).toEqual([
       expect.objectContaining({ outcome: "error", reason: "timeout", latency_ms: 8000 }),
     ]);
+    expect(of("log")[0].entry).not.toHaveProperty("error_message");
+    expect(of("log")[0].entry).not.toHaveProperty("status");
   });
 
   it("can be set to 4 s", async () => {
