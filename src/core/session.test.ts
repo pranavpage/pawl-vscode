@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSession, type Session, type SessionConfig } from "./session";
 import { doc, FakeClock, FakeModelClient } from "./testing/fakes";
-import { ModelError, type DocumentSnapshot, type Effect, type Level, type Position } from "./types";
+import { ModelError, type DocumentSnapshot, type Effect, type Level, type Position, type WorkspaceFiles } from "./types";
 
 function setup({
   hasKey = true,
@@ -11,7 +11,12 @@ function setup({
   const clock = new FakeClock();
   const model = new FakeModelClient(clock);
   const effects: Effect[] = [];
-  const config: SessionConfig = { timeoutMs: 8000, log: { enabled: true, prompts: false }, ...overrides };
+  const config: SessionConfig = {
+    timeoutMs: 8000,
+    log: { enabled: true, prompts: false },
+    keepTodoOnAccept: false,
+    ...overrides,
+  };
   const session = createSession({
     model,
     clock,
@@ -1163,5 +1168,446 @@ describe("the @pawl pin", () => {
     await session.dispatch({ type: "activeDocChanged", doc: doc(source, { languageId }) });
 
     expect(of("status").at(-1)).toEqual({ type: "status", text: status });
+  });
+});
+
+/** The `edit` effects so far. */
+const editsOf = (effects: Effect[]) => effects.filter((e): e is Extract<Effect, { type: "edit" }> => e.type === "edit");
+
+/**
+ * The file after Tab: the suggestion at the cursor, then the edits the accept brought. The
+ * cursor ends where the edits leave it, else after the suggestion.
+ */
+function afterAccept(document: DocumentSnapshot, suggestion: string, edit?: Extract<Effect, { type: "edit" }>): DocumentSnapshot {
+  const lines = document.text.split("\n");
+  const at = lines.slice(0, document.cursor.line).reduce((n, l) => n + l.length + 1, 0) + document.cursor.character;
+  let text = document.text.slice(0, at) + suggestion + document.text.slice(at);
+  const inserted = suggestion.split("\n");
+  let cursor: Position = {
+    line: document.cursor.line + inserted.length - 1,
+    character: (inserted.length === 1 ? document.cursor.character : 0) + inserted.at(-1)!.length,
+  };
+  if (edit) {
+    const offset = (p: Position) => text.split("\n").slice(0, p.line).reduce((n, l) => n + l.length + 1, 0) + p.character;
+    const ranges = edit.edits.map((e) => ({ ...e, from: offset(e.start), to: offset(e.end) }));
+    for (const e of ranges.sort((a, b) => b.from - a.from)) {
+      expect(text.slice(e.from, e.to)).toBe(e.replaces);
+      text = text.slice(0, e.from) + e.text + text.slice(e.to);
+    }
+    cursor = edit.cursor;
+  }
+  return { ...document, text, cursor };
+}
+
+/** A workspace folder holding `files`, by path. */
+function workspace(files: Record<string, string>): WorkspaceFiles {
+  return {
+    read: async (path) => files[path],
+    list: async (dir) =>
+      Object.keys(files)
+        .filter((path) => path.slice(0, Math.max(0, path.lastIndexOf("/"))) === dir)
+        .map((path) => path.slice(path.lastIndexOf("/") + 1)),
+  };
+}
+
+/** Presses go at `level`, waits for the suggestion and presses Tab. */
+async function acceptAt(level: Level, document: DocumentSnapshot, reply: string, config: Partial<SessionConfig> = {}) {
+  const t = setup({ level, config });
+  t.model.reply({ text: reply });
+  await t.session.dispatch({ type: "go", doc: document });
+  const ghost = t.of("ghost").at(-1)!.text;
+  await t.session.dispatch({ type: "accepted" });
+  return { ...t, ghost, after: afterAccept(document, ghost, editsOf(t.effects).at(-1)) };
+}
+
+describe("level 4", () => {
+  it("fills the TODO the cursor is under, names it in the in-flight marker, and removes it on accept", async () => {
+    const document = doc("def total(xs):\n    t = 0\n    # TODO: add up xs\n    |\n    return t\n");
+    const { model, of, after } = await acceptAt(4, document, "for x in xs:\n        t += x\n");
+
+    expect(of("marker")[0]).toEqual(expect.objectContaining({ text: "… TODO:3" }));
+    expect(model.requests[0].body.model).toBe("model-for-level-4");
+    expect(sentSystem(model)).toContain('TODO comment on line 3 asks for: "add up xs"');
+    expect(after.text).toBe("def total(xs):\n    t = 0\n    for x in xs:\n        t += x\n    return t\n");
+    expect(after.cursor).toEqual({ line: 3, character: 14 });
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ level: 4, outcome: "accepted" })]);
+  });
+
+  it("fills a TODO the cursor is at the end of, and leaves no blank line where it was", async () => {
+    const { after } = await acceptAt(4, doc("def f(xs):\n    # TODO: sort xs|\n    return xs\n"), "\n    xs = sorted(xs)\n");
+
+    expect(after.text).toBe("def f(xs):\n    xs = sorted(xs)\n    return xs\n");
+  });
+
+  it("carries a TODO on to the comment lines right under it, and removes them all", async () => {
+    const document = goDoc("package main\n\nfunc f(xs []int) int {\n\t// TODO: return the largest,\n\t// or 0 when xs is empty\n\t|\n}\n");
+    const { model, after } = await acceptAt(4, document, "return max(xs)\n");
+
+    expect(sentSystem(model)).toContain('"return the largest, or 0 when xs is empty"');
+    expect(after.text).toBe("package main\n\nfunc f(xs []int) int {\n\treturn max(xs)\n}\n");
+  });
+
+  it("removes only the comment of a TODO after code", async () => {
+    const { after } = await acceptAt(4, doc("def f(x):\n    y = g(x)  # TODO: check y\n    |\n"), "assert y\n");
+
+    expect(after.text).toBe("def f(x):\n    y = g(x)\n    assert y\n");
+  });
+
+  it("keeps the TODO with pawl.keepTodoOnAccept on", async () => {
+    const document = doc("def f(xs):\n    # TODO: sort xs\n    |\n");
+    const { after, effects } = await acceptAt(4, document, "return sorted(xs)\n", { keepTodoOnAccept: true });
+
+    expect(editsOf(effects)).toEqual([]);
+    expect(after.text).toBe("def f(xs):\n    # TODO: sort xs\n    return sorted(xs)\n");
+  });
+
+  it.each([
+    [
+      "Python, pass after a docstring and a comment, which stay",
+      doc('def area(r):\n    """Area of a circle."""\n    # r in metres\n    pass|\n'),
+      "\n    return 3.14 * r * r\n",
+      'def area(r):\n    """Area of a circle."""\n    # r in metres\n    return 3.14 * r * r\n',
+    ],
+    ["Python, ...", doc("def f(x):\n    |\n    ...\n\n\nf(1)\n"), "return x\n", "def f(x):\n    return x\n\n\nf(1)\n"],
+    [
+      "Python, raise NotImplementedError",
+      doc('class Shape:\n    def area(self):\n        |\n        raise NotImplementedError("later")\n'),
+      "return 0\n",
+      "class Shape:\n    def area(self):\n        return 0\n",
+    ],
+    [
+      "Go, panic(...)",
+      goDoc('package main\n\nfunc add(a, b int) int {\n\t|\n\tpanic("todo")\n}\n'),
+      "return a + b\n",
+      "package main\n\nfunc add(a, b int) int {\n\treturn a + b\n}\n",
+    ],
+    ["Go, no placeholder", goDoc("package main\n\nfunc add(a, b int) int {\n\t|\n}\n"), "return a + b\n", "package main\n\nfunc add(a, b int) int {\n\treturn a + b\n}\n"],
+  ])("fills the empty body the cursor is in and removes a lone placeholder: %s", async (_, document, reply, expected) => {
+    const { after, of, model } = await acceptAt(4, document, reply);
+
+    expect(of("marker")[0].text).toMatch(/^… body:\d+$/);
+    expect(sentSystem(model)).toContain("Fill the empty body of the function");
+    expect(after.text).toBe(expected);
+  });
+
+  it("fills an empty body from the blank line right under its header", async () => {
+    const { of } = await suggest(4, doc("def f(x):\n|\n\ndef g():\n    return 1\n"), "    return x\n");
+
+    expect(of("marker")[0].text).toBe("… body:1");
+  });
+
+  it.each([
+    ["a function that has code", doc("def f(x):\n    y = x\n    |\n")],
+    ["a TODO in lower case", doc("def f(x):\n    y = x\n    # todo: double it\n    |\n")],
+    ["a TODO two lines up", doc("def f(x):\n    # TODO: double it\n    y = x\n    |\n")],
+    ["the top level", doc("import os\n\n|\n")],
+  ])("falls back to level 3 and says so, without a TODO or empty body at the cursor: %s", async (_, document) => {
+    const { session, model, of } = await suggest(4, document, "x = 1\n");
+    await session.dispatch({ type: "accepted" });
+
+    expect(of("marker")[0].text).toBe("… · no TODO here, using level 3");
+    expect(model.requests[0].body.model).toBe("model-for-level-3");
+    expect(sentSystem(model)).not.toContain("TODO comment");
+    expect(of("log").map((l) => l.entry.level)).toEqual([3]);
+    expect(editsOf(of("edit"))).toEqual([]);
+  });
+
+  it("retries an empty reply once", async () => {
+    const { session, model, of } = setup({ level: 4 });
+    model.reply({ text: "" }).reply({ text: "return x\n" });
+
+    await session.dispatch({ type: "go", doc: doc("def f(x):\n    |\n") });
+    await session.dispatch({ type: "accepted" });
+
+    expect(model.requests).toHaveLength(2);
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ level: 4, attempts: 2, outcome: "accepted" })]);
+  });
+});
+
+describe("the context at levels 4–5", () => {
+  const python = workspace({
+    "app/main.py": "",
+    "app/utils.py": "def helper():\n    return 1\n",
+    "app/unused.py": "UNUSED = 1\n",
+    "pkg/__init__.py": "",
+    "pkg/models.py": "class Model:\n    pass\n",
+  });
+  const pythonDoc = (level: Level) =>
+    suggest(
+      level,
+      doc("from .utils import helper\nimport pkg.models\nimport os\n\ndef f():\n    |\n", { path: "app/main.py", files: python }),
+      "return helper()\n",
+    );
+
+  it("adds the files a Python file imports from the workspace, whole and nearest first", async () => {
+    const { model } = await pythonDoc(4);
+
+    const sent = sentFile(model);
+    expect(sent).toContain("app/utils.py\n\ndef helper():\n    return 1\n");
+    expect(sent).toContain("pkg/models.py\n\nclass Model:\n    pass\n");
+    expect(sent.indexOf("app/utils.py")).toBeLessThan(sent.indexOf("pkg/models.py"));
+    expect(sent).not.toContain("UNUSED");
+  });
+
+  it("adds a Go file's package siblings, then the packages it imports from its module", async () => {
+    const files = workspace({
+      "go.mod": "module example.com/shop\n\ngo 1.24\n",
+      "cmd/shop/main.go": "",
+      "cmd/shop/flags.go": "package main\n\nvar verbose bool\n",
+      "cmd/shop/main_test.go": "package main\n\nfunc TestX() {}\n",
+      "internal/store/store.go": "package store\n\ntype Store struct{}\n",
+      "internal/other/other.go": "package other\n",
+    });
+    const document = goDoc('package main\n\nimport (\n\t"fmt"\n\t"example.com/shop/internal/store"\n)\n\nfunc run(s store.Store) {\n\t|\n}\n');
+    const { model } = await suggest(4, { ...document, path: "cmd/shop/main.go", files }, "fmt.Println(s)\n");
+
+    const sent = sentFile(model);
+    expect(sent).toContain("var verbose bool");
+    expect(sent).toContain("type Store struct{}");
+    expect(sent.indexOf("var verbose bool")).toBeLessThan(sent.indexOf("type Store struct{}"));
+    expect(sent).not.toContain("TestX");
+    expect(sent).not.toContain("package other");
+  });
+
+  it("leaves out files past the cap and logs context_truncated", async () => {
+    const files = workspace({ "big.py": `X = "${"x".repeat(60_000)}"\n`, "small.py": "Y = 1\n" });
+    const { model, session, of } = await suggest(
+      4,
+      doc("import big\nimport small\n\ndef f():\n    |\n", { files }),
+      "return small.Y\n",
+    );
+    await session.dispatch({ type: "accepted" });
+
+    expect(sentFile(model)).not.toContain("xxxx");
+    expect(sentFile(model)).toContain("Y = 1");
+    expect(of("log")[0].entry).toEqual(expect.objectContaining({ context_truncated: true }));
+  });
+
+  it("is not added at level 3", async () => {
+    const { model } = await pythonDoc(3);
+
+    expect(sentFile(model)).not.toContain("def helper");
+  });
+});
+
+describe("a Q: reply", () => {
+  it.each([3, 4, 5] as const)("at level %i shows at the cursor as a marker, not ghost text, and is logged as question", async (level) => {
+    const document = doc("# PLAN\n# [ ] total the prices\n# END PLAN\n\ndef total(prices):\n    |\n");
+    const { session, of, model } = await suggest(level, document, "Q: Should prices in cents", " be rounded?\nreturn 0\n");
+    await session.dispatch({ type: "accepted" });
+
+    expect(of("ghost")).toEqual([]);
+    expect(of("marker").at(-1)).toEqual(
+      expect.objectContaining({ text: "Q: Should prices in cents be rounded?", at: { line: 5, character: 4 } }),
+    );
+    expect(of("marker").at(-1)?.ttlMs).toBeUndefined();
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0].aborted).toBe(true);
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({ outcome: "question", suggestion: "Q: Should prices in cents be rounded?" }),
+    ]);
+  });
+
+  it("stays until the cursor moves", async () => {
+    const { session, of } = await suggest(4, doc("def f(x):\n    |\n"), "Q: Which x?\n");
+    const cleared = of("clearMarker").length;
+
+    await session.dispatch({ type: "cursorMoved", docId: "file:///work/main.py", at: { line: 1, character: 4 } });
+    expect(of("clearMarker")).toHaveLength(cleared);
+    await session.dispatch({ type: "cursorMoved", docId: "file:///work/main.py", at: { line: 0, character: 0 } });
+    expect(of("clearMarker")).toHaveLength(cleared + 1);
+  });
+
+  it.each([1, 2] as const)("at level %i counts as empty", async (level) => {
+    const { session, of } = await suggest(level, doc("def f(x):\n    |\n"), "Q: Which x?\n");
+    await session.dispatch({ type: "accepted" });
+
+    expect(of("ghost")).toEqual([]);
+    expect(of("marker").at(-1)).toEqual(expect.objectContaining({ text: "· nothing to add" }));
+    expect(of("log").map((l) => l.entry.outcome)).toEqual(["empty"]);
+  });
+
+  it("is never part of a suggestion: a Q: line after code ends it", async () => {
+    const { ghost } = await suggest(3, doc("def f(x):\n    |\n"), "y = x * 2\n    Q: return y too?\n    return y\n");
+
+    expect(ghost).toEqual(["y = x * 2"]);
+  });
+});
+
+describe("level 5", () => {
+  const plan = (cursorLine = "|") =>
+    doc(
+      [
+        "# PLAN",
+        "# [x] read the numbers",
+        "# [ ] print their sum",
+        "# [ ] print their mean",
+        "# END PLAN",
+        "import sys",
+        "",
+        "nums = [int(a) for a in sys.argv[1:]]",
+        cursorLine,
+        "",
+      ].join("\n"),
+    );
+
+  it("writes code for the first unchecked step only, at the cursor", async () => {
+    const { session, model, of, ghost } = await suggest(5, plan(), "print(sum(nums))\n");
+    await session.dispatch({ type: "rejected" });
+
+    expect(of("marker")[0].text).toBe("… plan step 2");
+    expect(model.requests[0].body.model).toBe("model-for-level-5");
+    expect(sentSystem(model)).toContain('step 2 only: "print their sum"');
+    expect(ghost).toEqual(["print(sum(nums))"]);
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ level: 5, plan_step: 2, outcome: "rejected" })]);
+  });
+
+  it("ticks the step on accept and leaves the cursor on a new line just after the code", async () => {
+    const { after } = await acceptAt(5, plan("    |"), "print(sum(nums))\n");
+
+    expect(after.text).toContain("# [x] print their sum\n# [ ] print their mean");
+    expect(after.text).toContain("nums = [int(a) for a in sys.argv[1:]]\n    print(sum(nums))\n    \n");
+    expect(after.cursor).toEqual({ line: 9, character: 4 });
+  });
+
+  it.each(["x = 1|", "  x|  ", "|x"])("needs the cursor on an empty line, not %j", async (line) => {
+    const { session, model, of } = setup({ level: 5 });
+
+    await session.dispatch({ type: "go", doc: plan(line) });
+
+    expect(model.requests).toHaveLength(0);
+    expect(of("marker")).toEqual([expect.objectContaining({ text: "· move to an empty line", ttlMs: 3000 })]);
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({ level: 5, plan_step: 2, outcome: "error", reason: "not_empty_line", attempts: 0 }),
+    ]);
+  });
+
+  it("moves an import the step needs to the file's imports, and says +1 import while in flight", async () => {
+    const { of, ghost, after } = await acceptAt(5, plan(), "import statistics\nprint(statistics.mean(nums))\n");
+
+    expect(of("marker").map((m) => m.text)).toEqual(["… plan step 2", "… plan step 2 +1 import"]);
+    expect(ghost).toBe("print(statistics.mean(nums))");
+    expect(after.text).toContain("# END PLAN\nimport sys\nimport statistics\n\nnums");
+    expect(after.text).toContain("nums = [int(a) for a in sys.argv[1:]]\nprint(statistics.mean(nums))\n\n");
+    expect(after.cursor).toEqual({ line: 10, character: 0 });
+  });
+
+  it("does not add an import the file already has", async () => {
+    const { of, after } = await acceptAt(5, plan(), "import sys\nprint(len(sys.argv))\n");
+
+    expect(of("marker").map((m) => m.text)).toEqual(["… plan step 2"]);
+    expect(after.text.match(/import sys/g)).toHaveLength(1);
+  });
+
+  it("adds a Go import to the file's import group", async () => {
+    const document = goDoc(
+      'package main\n\n// PLAN\n// [ ] shout the name\n// END PLAN\n\nimport (\n\t"fmt"\n)\n\nfunc main() {\n\tname := "x"\n\t|\n}\n',
+    );
+    const { after } = await acceptAt(5, document, 'import "strings"\nfmt.Println(strings.ToUpper(name))\n');
+
+    expect(after.text).toContain('import (\n\t"fmt"\n\t"strings"\n)');
+    expect(after.text).toContain('// [x] shout the name');
+    expect(after.text).toContain('\tname := "x"\n\tfmt.Println(strings.ToUpper(name))\n\t\n}');
+  });
+
+  it("leaves a rejected step unchecked, so the next press retries it", async () => {
+    const { session, model, of } = setup({ level: 5 });
+    model.reply({ text: "print(sum(nums))\n" }).reply({ text: "print(sum(nums, 0))\n" });
+
+    await session.dispatch({ type: "go", doc: plan() });
+    await session.dispatch({ type: "rejected" });
+    await session.dispatch({ type: "go", doc: plan() });
+
+    expect(model.requests.map((r) => r.body.messages[0].content)).toEqual([
+      expect.stringContaining('step 2 only: "print their sum"'),
+      expect.stringContaining('step 2 only: "print their sum"'),
+    ]);
+    expect(editsOf(of("edit"))).toEqual([]);
+  });
+
+  it("picks up edits to the plan on the next press", async () => {
+    const { session, model } = setup({ level: 5 });
+    model.reply({ text: "x\n" }).reply({ text: "y\n" });
+    const edited = (d: DocumentSnapshot) => ({ ...d, text: d.text.replace("# [ ] print their sum", "# [ ] print their sum, labelled") });
+
+    await session.dispatch({ type: "go", doc: plan() });
+    await session.dispatch({ type: "rejected" });
+    await session.dispatch({ type: "go", doc: edited(plan()) });
+
+    expect(sentSystem(model)).toContain('"print their sum, labelled"');
+  });
+
+  it.each([
+    ["longer than 40 lines", Array.from({ length: 41 }, (_, k) => `print(${k})\n`).join("")],
+    ["code that doesn't parse", "print(sum(nums)\nprint(1)\n"],
+  ])("shows ! step too big for %s, and logs it as an error", async (_, reply) => {
+    const { session, of } = await suggest(5, plan(), reply);
+    await session.dispatch({ type: "accepted" });
+
+    expect(of("ghost")).toEqual([]);
+    expect(of("marker").at(-1)).toEqual(expect.objectContaining({ text: "! step too big, split it in the plan", ttlMs: 3000 }));
+    expect(of("log").map((l) => l.entry)).toEqual([
+      expect.objectContaining({ outcome: "error", reason: "step_too_big", plan_step: 2 }),
+    ]);
+  });
+
+  it("stops the stream once a step is past 40 lines", async () => {
+    const { model } = await suggest(5, plan(), ...Array.from({ length: 60 }, (_, k) => `print(${k})\n`));
+
+    expect(model.requests[0].aborted).toBe(true);
+  });
+
+  it.each([
+    ["no plan", doc("def f(x):\n    |\n"), "… body:1 · no plan, using level 4", 4],
+    ["no plan and no TODO", doc("x = 1\n|\n"), "… · no plan, no TODO here, using level 3", 3],
+    ["every step done", doc("# PLAN\n# [x] a\n# END PLAN\ndef f():\n    |\n"), "… body:4 · plan done, using level 4", 4],
+    ["a PLAN comment without steps", doc("# PLAN: tidy up later\ndef f():\n    |\n"), "… body:2 · no plan, using level 4", 4],
+  ] as const)("falls back with %s, and says so", async (_, document, marker, level) => {
+    const { session, model, of } = await suggest(5, document, "return 1\n");
+    await session.dispatch({ type: "rejected" });
+
+    expect(of("marker")[0].text).toBe(marker);
+    expect(model.requests[0].body.model).toBe(`model-for-level-${level}`);
+    expect(of("log").map((l) => l.entry)).toEqual([expect.objectContaining({ level })]);
+    expect(of("log")[0].entry).not.toHaveProperty("plan_step");
+  });
+
+  it("finishes a 4-step plan in 4 presses and 4 Tabs, with every step marked [x]", async () => {
+    const { session, model, effects, of } = setup({ level: 5 });
+    const steps = ["import sys\nnums = [int(a) for a in sys.argv[1:]]\n", "total = sum(nums)\n", "mean = total / len(nums)\n", "print(total, mean)\n"];
+    for (const text of steps) model.reply({ text });
+    let file = doc("# PLAN\n# [ ] read the numbers\n# [ ] sum them\n# [ ] average them\n# [ ] print both\n# END PLAN\n\n|\n");
+
+    for (let press = 0; press < 4; press++) {
+      await session.dispatch({ type: "go", doc: file });
+      await session.dispatch({ type: "accepted" });
+      file = afterAccept(file, of("ghost").at(-1)!.text, editsOf(effects).at(-1));
+    }
+
+    expect(model.requests.map((r) => r.body.messages[0].content.match(/step (\d) only/)?.[1])).toEqual(["1", "2", "3", "4"]);
+    expect(file.text).toBe(
+      [
+        "# PLAN",
+        "# [x] read the numbers",
+        "# [x] sum them",
+        "# [x] average them",
+        "# [x] print both",
+        "# END PLAN",
+        "import sys",
+        "",
+        "nums = [int(a) for a in sys.argv[1:]]",
+        "total = sum(nums)",
+        "mean = total / len(nums)",
+        "print(total, mean)",
+        "",
+        "",
+      ].join("\n"),
+    );
+    expect(of("log").map((l) => [l.entry.plan_step, l.entry.outcome])).toEqual([
+      [1, "accepted"],
+      [2, "accepted"],
+      [3, "accepted"],
+      [4, "accepted"],
+    ]);
   });
 });

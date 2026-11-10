@@ -1,6 +1,7 @@
 // Stop points: where a suggestion must end at each level. Python and Go are parsed with
 // tree-sitter, with the suggestion inserted at the cursor. Other languages, and replies
 // the parser can't make sense of, use indentation and brackets.
+import { splitImports } from "./imports";
 import { Lexer, syntaxFor } from "./lexer";
 import { hasErrorIn, type Grammar, type Node } from "./syntax";
 import type { Level } from "./types";
@@ -313,4 +314,39 @@ function heuristicEnd(unit: Unit, at: Insertion, lexer: Lexer, written: string):
     i += width;
   }
   return undefined;
+}
+
+/** The most lines a level-5 step may write. */
+export const MAX_STEP_LINES = 40;
+
+/**
+ * Level 5: a step runs to the end of the reply. It is cut early only once it is past the line
+ * cap, which makes it too big anyway. Import lines at its start don't count.
+ */
+export function planStepRule(languageId: string): StopRule {
+  return (text, done) => {
+    if (done) return text.trimEnd();
+    const { code } = splitImports(text, languageId, false);
+    return code.split("\n").length > MAX_STEP_LINES + 1 ? text : undefined;
+  };
+}
+
+/** True if inserting `written` at the cursor leaves the file parsing no worse than before. */
+export function parsesWith(at: Insertion, written: string, grammar?: Grammar): boolean {
+  if (!grammar) {
+    // Without a parser: the step must close every bracket, string and comment it opens.
+    const before = new Lexer(syntaxFor(at.languageId)).read(at.head);
+    const after = before.clone().read(written);
+    return !after.inText && after.stack.join() === before.stack.join();
+  }
+  const errors = (text: string) => {
+    const tree = grammar.parser.parse(text);
+    if (!tree) return Infinity;
+    try {
+      return countErrors(tree.rootNode);
+    } finally {
+      tree.delete();
+    }
+  };
+  return errors(at.head + written + at.tail) <= errors(at.head + at.tail);
 }

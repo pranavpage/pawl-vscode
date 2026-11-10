@@ -89,7 +89,11 @@ export class Lexer {
 
   /** True inside a comment or a string. */
   get inText(): boolean {
-    return this.lineComment || this.blockEnd !== undefined || this.quote !== undefined;
+    return this.inComment || this.quote !== undefined;
+  }
+
+  get inComment(): boolean {
+    return this.lineComment || this.blockEnd !== undefined;
   }
 
   /** Reads `text` to its end. */
@@ -154,15 +158,59 @@ export class Lexer {
   }
 }
 
+/** One line of source, split by what the lexer saw on it. */
+export interface ScannedLine {
+  /** The comment text, delimiters left out. */
+  comment: string;
+  /** Columns of the line's comments, delimiters included: from the first one's start to the last one's end. */
+  commentStart?: number;
+  commentEnd?: number;
+  /** The line with comments left out. */
+  code: string;
+  /** The line with comments and strings left out, delimiters too. */
+  bare: string;
+  /** True if the line starts inside a block comment or a multi-line string. */
+  startsInText: boolean;
+  /** True if it ends inside one. */
+  endsInText: boolean;
+}
+
+export function scanLines(text: string, syntax: LanguageSyntax): ScannedLine[] {
+  const lexer = new Lexer(syntax);
+  const lines: ScannedLine[] = [];
+  const blank = (startsInText: boolean): ScannedLine => ({ comment: "", code: "", bare: "", startsInText, endsInText: false });
+  let line = blank(false);
+  let column = 0;
+  for (let i = 0; i < text.length; ) {
+    if (text[i] === "\n") {
+      lexer.step(text, i);
+      line.endsInText = lexer.inText;
+      lines.push(line);
+      line = blank(lexer.inText);
+      column = 0;
+      i++;
+      continue;
+    }
+    const wasComment = lexer.inComment;
+    const { width, kind } = lexer.step(text, i);
+    const piece = text.slice(i, i + width);
+    if (kind === "comment" || (kind === "delimiter" && (wasComment || lexer.inComment))) {
+      if (kind === "comment") line.comment += piece;
+      line.commentStart ??= column;
+      line.commentEnd = column + width;
+    } else {
+      line.code += piece;
+      if (kind === "code") line.bare += piece;
+    }
+    i += width;
+    column += width;
+  }
+  line.endsInText = lexer.inText;
+  lines.push(line);
+  return lines;
+}
+
 /** The comment text on each line of `text`, with code, strings and delimiters left out. */
 export function commentsIn(text: string, syntax: LanguageSyntax): string[] {
-  const lexer = new Lexer(syntax);
-  const comments = [""];
-  for (let i = 0; i < text.length; ) {
-    const { width, kind } = lexer.step(text, i);
-    if (text[i] === "\n") comments.push("");
-    else if (kind === "comment") comments[comments.length - 1] += text.slice(i, i + width);
-    i += width;
-  }
-  return comments;
+  return scanLines(text, syntax).map((line) => line.comment);
 }

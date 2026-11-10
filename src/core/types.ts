@@ -32,6 +32,19 @@ export interface DocumentSnapshot {
   cursorCount: number;
   /** True when the main selection isn't empty. */
   hasSelection: boolean;
+  /** The files around this one, for the imported and sibling files levels 4–5 send. */
+  files?: WorkspaceFiles;
+}
+
+/**
+ * Read access to the workspace folder a document is in. Paths are relative to that
+ * folder, as in `DocumentSnapshot.path`, with `/` between parts.
+ */
+export interface WorkspaceFiles {
+  /** The file's text, or undefined if there is no such file. */
+  read(path: string): Promise<string | undefined>;
+  /** The names of the files in a folder, folders left out; empty if there is no such folder. */
+  list(dir: string): Promise<string[]>;
 }
 
 export type SessionEvent =
@@ -54,7 +67,16 @@ export type SessionEvent =
   /** The off key (level 0) or a pick from the level list. */
   | { type: "setLevel"; level: Level };
 
-export type Outcome = "accepted" | "partial" | "rejected" | "dismissed" | "empty" | "error" | "cancelled" | "off";
+export type Outcome =
+  | "accepted"
+  | "partial"
+  | "rejected"
+  | "dismissed"
+  | "empty"
+  | "error"
+  | "cancelled"
+  | "question"
+  | "off";
 
 export interface LogEntry {
   ts: string;
@@ -75,6 +97,17 @@ export interface LogEntry {
   reason?: string;
   /** For `partial`: how much of the suggestion ended up in the file. */
   accepted_chars?: number;
+  /** Level 5 only: the number of the plan step the press wrote. */
+  plan_step?: number;
+}
+
+/** Replaces the text from `start` to `end`. */
+export interface TextEdit {
+  start: Position;
+  end: Position;
+  text: string;
+  /** The text the range holds now; if it holds anything else, the edit is stale. */
+  replaces: string;
 }
 
 export type Effect =
@@ -86,6 +119,11 @@ export type Effect =
   | { type: "notice"; text: string; ttlMs: number }
   | { type: "ghost"; docId: string; at: Position; text: string }
   | { type: "clearGhost" }
+  /**
+   * The edits an accepted suggestion brings with it, such as ticking its plan step. Positions are
+   * in the document with the suggestion in it. Apply all or none, then put the cursor at `cursor`.
+   */
+  | { type: "edit"; docId: string; edits: TextEdit[]; cursor: Position }
   /** Leaves only the main cursor, with nothing selected. */
   | { type: "collapseSelection"; docId: string; at: Position }
   /** The global level changed; persist it so it survives a restart. */

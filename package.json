@@ -128,6 +128,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Add the full prompt, which includes your code, to each session log line."
+        },
+        "pawl.keepTodoOnAccept": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Keep a `TODO:` comment once level 4 has filled it. Off: accepting the code removes the comment."
         }
       }
     }
