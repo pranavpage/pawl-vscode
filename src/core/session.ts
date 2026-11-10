@@ -6,7 +6,7 @@ import { findMarkers, findPin, type Pin } from "./markers";
 import { createCutter, replyBody, type Cut, type Cutter } from "./output";
 import { buildMessages, CONTINUE_NUDGE } from "./prompt";
 import { relatedFiles } from "./related";
-import { MAX_STEP_LINES, parsesWith, planStepRule, stopRule, type Insertion } from "./stops";
+import { MAX_STEP_LINES, parsesWith, planStepRule, stopRule, type Insertion, type StopRule } from "./stops";
 import { loadGrammar } from "./syntax";
 import { isoWithOffset } from "./time";
 import { ModelError, type ChatMessage, type ChatRequest, type Clock, type DocumentSnapshot, type Effect, type Level, type LogEntry, type ModelClient, type Position, type SessionEvent } from "./types";
@@ -327,10 +327,8 @@ export function createSession(deps: SessionDeps): Session {
       const messages = buildMessages(doc, level, context, markers.rules, { task: aim.task, notThis });
       draft.prompt = messages;
       grammar = level >= 2 ? await loadGrammar(doc.languageId) : undefined;
-      const newCutter = () =>
-        createCutter(level === 5 ? planStepRule(doc.languageId) : stopRule(level, insertion, grammar), {
-          questions: level >= 3,
-        });
+      const rule = level === 5 ? planStepRule(doc.languageId) : stopRule(level, insertion, grammar);
+      const newCutter = () => createCutter(dropFirstLineIndent(rule, insertion.head), { questions: level >= 3 });
       // At level 5, the marker says so as soon as the step brings new imports.
       let importsShown = 0;
       const onText =
@@ -483,6 +481,18 @@ export function createSession(deps: SessionDeps): Session {
       }
     },
   };
+}
+
+/**
+ * The editor has already indented a whitespace-only cursor line, and the suggestion goes in at the
+ * cursor, so the reply's first line must not add more indent: any it starts with goes before the
+ * stop rule reads it, else a dedent from it looks like the end of the block. At column 0, or after
+ * code, the reply is left as it is.
+ */
+export function dropFirstLineIndent(rule: StopRule, head: string): StopRule {
+  const before = head.slice(head.lastIndexOf("\n") + 1);
+  if (!/^[ \t]+$/.test(before)) return rule;
+  return (text, done) => rule(text.replace(/^[ \t]+/, ""), done);
 }
 
 /**

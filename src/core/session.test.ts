@@ -1621,3 +1621,56 @@ describe("level 5", () => {
     ]);
   });
 });
+
+describe("a reply that indents its first line again", () => {
+  it.each([
+    [
+      "level 3, Python, one extra space",
+      3,
+      doc("def group(xs):\n    |\n"),
+      [" grouped = {}\n    for a in xs:\n", "        grouped[a] = 1\n    return grouped\n"],
+      "grouped = {}\n    for a in xs:\n        grouped[a] = 1\n    return grouped",
+    ],
+    [
+      "level 4, Python, under a TODO",
+      4,
+      doc("def fetch():\n    # TODO: fetch the alarms\n    |\n"),
+      [" alarms = []\n    page = 1\n"],
+      "alarms = []\n    page = 1",
+    ],
+    ["level 3, Python, the cursor's full indent repeated", 3, doc("def f():\n    |\n"), ["    x = 1\n"], "x = 1"],
+    [
+      "level 3, Go, a tab",
+      3,
+      goDoc("package main\n\nfunc f() {\n\t|\n}\n"),
+      ["\tx := 1\n\t_ = x\n"],
+      "x := 1\n\t_ = x",
+    ],
+  ])("starts at the cursor: %s", async (_, level, document, chunks, expected) => {
+    const { ghost } = await suggest(level as Level, document, ...chunks);
+
+    expect(ghost).toEqual([expected]);
+  });
+
+  it("keeps the reply's indent with the cursor at column 0", async () => {
+    const { ghost } = await suggest(3, doc("def f(x):\n|\n"), "    return x\n");
+
+    expect(ghost).toEqual(["    return x"]);
+  });
+
+  it.each([1, 3] as Level[])("leaves the reply alone after code on the cursor's line, at level %i", async (level) => {
+    const { ghost } = await suggest(level, doc("def f():\n    y = |\n"), " 1\n");
+
+    expect(ghost).toEqual([" 1"]);
+  });
+
+  it.each([
+    ["the cursor's full indent", "    print(sum(nums))\n"],
+    ["one extra space", " print(sum(nums))\n"],
+  ])("leaves a level-5 step starting at the cursor: %s", async (_, reply) => {
+    const document = doc("# PLAN\n# [ ] print the sum\n# END PLAN\nnums = [1]\nif nums:\n    |\n");
+    const { ghost } = await suggest(5, document, reply);
+
+    expect(ghost).toEqual(["print(sum(nums))"]);
+  });
+});
