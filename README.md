@@ -43,13 +43,13 @@ npm run eval -- --levels 5 --model 5=z-ai/glm-5.3   # level 5 on GLM 5.3
 npm run eval -- --presses 4 --out results.json      # a quick run; every press saved as JSON
 ```
 
-| Option | Default | |
+| Option | Default | What it does |
 | --- | --- | --- |
 | `--presses N` | `20` | Presses per level, shared between its fixtures |
 | `--levels 1,2,…` | `1,2,3,4,5` | Levels to run |
 | `--model L=ID` | Pawl's defaults | The OpenRouter model for level `L`. You can give this option more than once. |
 | `--timeout 4s\|8s` | `8s` | The deadline for each press, as the `pawl.timeout` setting |
-| `--out FILE` | | Writes every press as JSON, with each suggestion and the model's raw reply |
+| `--out FILE` | None | Writes every press as JSON, with each suggestion and the model's raw reply |
 
 For each level, the report gives:
 
